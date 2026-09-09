@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-const Repo = "github.com/shirou-eh/shirou-eh/notiongate"
-const CurrentVersion = "1.0.0"
+const Repo = "shirou-eh/notiongate"
+const CurrentVersion = "1.2.0"
 
 type Release struct {
 	TagName string `json:"tag_name"`

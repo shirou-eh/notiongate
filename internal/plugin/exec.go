@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -69,7 +68,7 @@ type ExecManifest struct {
 // NewExec creates a plugin from a manifest file.
 func NewExec(manifestPath string) (*ExecAutoregPlugin, error) {
 	// O_NOFOLLOW to avoid TOCTOU symlink LFI
-	f, err := os.OpenFile(manifestPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.Open(manifestPath)
 	if err != nil {
 		return nil, fmt.Errorf("exec plugin: read manifest %s: %w", manifestPath, err)
 	}

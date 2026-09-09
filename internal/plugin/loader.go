@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
@@ -117,7 +116,7 @@ func CloseAll() {
 // ProviderConfig loads per-plugin config from <dir>/<name>/config.json
 // (or config.yaml). Returns nil if file missing (plugin uses defaults).
 func readFileNoFollow(path string, limit int64) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}

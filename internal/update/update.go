@@ -15,7 +15,7 @@ import (
 )
 
 const Repo = "shirou-eh/notiongate"
-const CurrentVersion = "1.2.1"
+const CurrentVersion = "1.2.3"
 
 type Release struct {
 	TagName string `json:"tag_name"`

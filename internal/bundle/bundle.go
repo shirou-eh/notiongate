@@ -20,13 +20,33 @@ type Options struct {
 }
 
 func DefaultInclude() []string {
-	return []string{
-		"data/notiongate.db",
+	inc := []string{
 		".env",
 		"docker-compose.yml",
 		"plugins",
 		"extensions",
+		"data",
 	}
+	// Глобальная БД — всегда включаем, где бы ни был запуск
+	if home, err := os.UserHomeDir(); err == nil {
+		gdb := filepath.Join(home, ".local", "share", "notiongate", "notiongate.db")
+		if _, err := os.Stat(gdb); err == nil {
+			inc = append(inc, gdb)
+			// WAL тоже
+			for _, suf := range []string{"-wal", "-shm"} {
+				if _, err := os.Stat(gdb + suf); err == nil {
+					inc = append(inc, gdb+suf)
+				}
+			}
+		}
+		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+			gdb2 := filepath.Join(xdg, "notiongate", "notiongate.db")
+			if _, err := os.Stat(gdb2); err == nil {
+				inc = append(inc, gdb2)
+			}
+		}
+	}
+	return inc
 }
 
 // Create собирает бандл.

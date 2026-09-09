@@ -145,41 +145,46 @@ func envDur(key string, def time.Duration) time.Duration {
 }
 
 func defaultDBPath() string {
-	// Dev: ./data/notiongate.db exists → use it
-	if _, err := os.Stat("./data/notiongate.db"); err == nil {
+	var p string
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		p = filepath.Join(xdg, "notiongate", "notiongate.db")
+	} else if home, err := os.UserHomeDir(); err == nil {
+		p = filepath.Join(home, ".local", "share", "notiongate", "notiongate.db")
+	} else {
 		return "./data/notiongate.db"
 	}
-	// Global: XDG_DATA_HOME or ~/.local/share
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "notiongate", "notiongate.db")
+	// Миграция со старого пути ./data/notiongate.db → глобальный
+	// Если новый пустой (0 аккаунтов) а старый с данными — тоже мигрируем
+	needMigrate := false
+	if _, err := os.Stat(p); os.IsNotExist(err) {
+		needMigrate = true
+	} else if fi, err := os.Stat(p); err == nil && fi.Size() < 1024 {
+		// подозрительно маленький — проверим количество аккаунтов
+		needMigrate = true
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".local", "share", "notiongate", "notiongate.db")
+	if needMigrate {
+		if _, err2 := os.Stat("./data/notiongate.db"); err2 == nil {
+			_ = os.MkdirAll(filepath.Dir(p), 0o700)
+			if data, err3 := os.ReadFile("./data/notiongate.db"); err3 == nil && len(data) > 1024 {
+				_ = os.WriteFile(p, data, 0o600)
+				for _, suf := range []string{"-wal", "-shm"} {
+					if d, err := os.ReadFile("./data/notiongate.db" + suf); err == nil && len(d) > 0 {
+						_ = os.WriteFile(p+suf, d, 0o600)
+					}
+				}
+			}
+		}
 	}
-	return "./data/notiongate.db"
+	return p
 }
 
 func defaultPluginsDir() string {
-	// Dev: ./plugins exists → use it
-	if _, err := os.Stat("./plugins"); err == nil {
-		return "./plugins"
-	}
-	if _, err := os.Stat("./extensions"); err == nil {
-		return "./extensions"
-	}
+	// Глобально везде: XDG_CONFIG_HOME или ~/.config
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		p := filepath.Join(xdg, "notiongate", "plugins")
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
+		return filepath.Join(xdg, "notiongate", "plugins")
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		p := filepath.Join(home, ".config", "notiongate", "plugins")
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-		// fallback to XDG global even if not exists yet
-		return p
+		return filepath.Join(home, ".config", "notiongate", "plugins")
 	}
 	return "./plugins"
 }

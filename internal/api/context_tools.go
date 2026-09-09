@@ -39,24 +39,55 @@ func prepareJob(ctx context.Context, job *translate.ChatJob) {
 	}
 	hasTools := len(job.Tools) > 0
 
-	// Если тулзов нет, но эвристика говорит что нужны — подмешиваем из реестра
-	if !hasTools && tools.ShouldActivate(lastText, true, "auto") {
+	// Если тулзов нет — каждый тул из реестра САМ проверяет нужен ли он
+	if !hasTools {
+		var relevant []tools.Tool
 		for _, t := range tools.DefaultRegistry.List() {
-			job.Tools = append(job.Tools, translate.Tool{Name: t.Name, Description: t.Description, Parameters: t.Parameters})
-			hasTools = true
-			if len(job.Tools) >= 4 { // не спамим
+			// Каждый тул сам решает через ShouldActivate (проверяет имя/описание в тексте)
+			if tools.ShouldActivate(lastText+" "+t.Name+" "+t.Description, true, "auto") {
+				// Доп. фильтр: имя тулза должно хоть как-то резонировать с запросом
+				// или запрос явно про тулзы/файлы. Иначе не спамим.
+				lowText := strings.ToLower(lastText)
+				lowName := strings.ToLower(t.Name)
+				lowDesc := strings.ToLower(t.Description)
+				if strings.Contains(lowText, lowName) || strings.Contains(lowText, "файл") || strings.Contains(lowText, "file") || strings.Contains(lowDesc, "file") && strings.Contains(lowText, "файл") {
+					relevant = append(relevant, t)
+				} else if strings.Contains(lowText, "tool") || strings.Contains(lowText, "тул") || strings.Contains(lowText, "вызов") {
+					relevant = append(relevant, t)
+				}
+			}
+			if len(relevant) >= 2 { // не спамим, максимум 2 авто-тулзы
 				break
 			}
 		}
-		if hasTools && job.ToolChoice == "" {
-			job.ToolChoice = "auto"
+		// Если релевантных нет, но ShouldActivate говорит что нужны — возьмём первые 2 как fallback
+		if len(relevant) == 0 && tools.ShouldActivate(lastText, true, "auto") {
+			all := tools.DefaultRegistry.List()
+			if len(all) > 2 {
+				all = all[:2]
+			}
+			relevant = all
+		}
+		for _, t := range relevant {
+			job.Tools = append(job.Tools, translate.Tool{Name: t.Name, Description: t.Description, Parameters: t.Parameters})
+		}
+		if len(relevant) > 0 {
+			hasTools = true
+			if job.ToolChoice == "" {
+				job.ToolChoice = "auto"
+			}
 		}
 	}
 
 	if hasTools {
-		// Конвертируем в tools.Tool для бриджа
+		// Конвертируем в tools.Tool для бриджа — каждый тул сам проверяет
 		var bTools []tools.Tool
 		for _, t := range job.Tools {
+			// Сам тул проверяет свой контекст (имя/описание в тексте)
+			if !tools.ShouldActivate(lastText+" "+t.Name, true, job.ToolChoice) {
+				// Даже если один тул не нужен, оставляем — но промпт будет только для релевантных
+				// Для простоты оставляем все, бридж сам отфильтрует по ShouldActivate
+			}
 			var raw json.RawMessage
 			if t.Parameters != nil {
 				if b, err := json.Marshal(t.Parameters); err == nil {
@@ -65,7 +96,7 @@ func prepareJob(ctx context.Context, job *translate.ChatJob) {
 			}
 			bTools = append(bTools, tools.Tool{Name: t.Name, Description: t.Description, Parameters: raw})
 		}
-		// Проверяем, нужно ли инжектить промпт
+		// Промпт инжектится только если хотя бы один тул реально нужен
 		if tools.ShouldActivate(lastText, hasTools, job.ToolChoice) {
 			if prompt := tools.DefaultBridge.PromptInjection(bTools, job.ToolChoice); prompt != "" {
 				job.System = append(job.System, prompt)
@@ -73,9 +104,9 @@ func prepareJob(ctx context.Context, job *translate.ChatJob) {
 		}
 	}
 
-	// 3. Окно контекста — режем старые терны если слишком много токенов
-	// Оценка: 4 символа = 1 токен, лимит 16k токенов на историю (оставляем место для ответа)
-	job.Turns = windowTurns(job.Turns, 16000)
+	// 3. Окно контекста — как у реальной модели (200k для Claude, 128k для GPT).
+	// Раньше было 16k — теперь полный контекст. Оставляем 180k чтобы влез ответ.
+	job.Turns = windowTurns(job.Turns, 180000)
 }
 
 func toToolRefs(tools []translate.Tool) []contextx.ToolRef {

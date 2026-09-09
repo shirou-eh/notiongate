@@ -20,19 +20,40 @@ func (p *SystemProvider) Provide(_ context.Context, req *Request) (string, error
 	return strings.Join(req.System, "\n\n"), nil
 }
 
-// TimeProvider — текущее время, таймзона. Просто существует.
+// TimeProvider — сам проверяет нужен ли он: только если в последних
+// сообщениях есть упоминание времени/даты.
 type TimeProvider struct{ EnabledFlag bool }
 
 func (p *TimeProvider) Name() string  { return "time" }
 func (p *TimeProvider) Priority() int { return 90 }
 func (p *TimeProvider) Enabled() bool { return p.EnabledFlag }
-func (p *TimeProvider) Provide(_ context.Context, _ *Request) (string, error) {
+func (p *TimeProvider) Provide(_ context.Context, req *Request) (string, error) {
+	if !needsTime(req) {
+		return "", nil
+	}
 	now := time.Now().Format(time.RFC3339)
 	return fmt.Sprintf("Current time: %s", now), nil
 }
 
-// WorkspaceProvider — заглушка для будущего: имя спейса, проект.
-// Сейчас просто отдаёт модель/юзера, чтобы Notion видел контекст.
+func needsTime(req *Request) bool {
+	text := ""
+	for i := len(req.Turns) - 1; i >= 0 && i >= len(req.Turns)-3; i-- {
+		text += " " + strings.ToLower(req.Turns[i].Text)
+	}
+	for _, s := range req.System {
+		text += " " + strings.ToLower(s)
+	}
+	triggers := []string{"время", "дата", "сегодня", "завтра", "сейчас", "time", "date", "today", "срок", "дедлайн"}
+	for _, t := range triggers {
+		if strings.Contains(text, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// WorkspaceProvider — сам проверяет: отдаёт только если в контексте
+// упоминаются файлы/проект или явно запрошена модель.
 type WorkspaceProvider struct {
 	EnabledFlag bool
 	SpaceName   string
@@ -42,21 +63,37 @@ func (p *WorkspaceProvider) Name() string  { return "workspace" }
 func (p *WorkspaceProvider) Priority() int { return 20 }
 func (p *WorkspaceProvider) Enabled() bool { return p.EnabledFlag }
 func (p *WorkspaceProvider) Provide(_ context.Context, req *Request) (string, error) {
-	if p.SpaceName == "" && req.Model == "" {
+	// Сам проверяет нужен ли воркспейс-контекст
+	hasFileMention := false
+	for _, t := range req.Turns {
+		low := strings.ToLower(t.Text)
+		if strings.Contains(low, "файл") || strings.Contains(low, "file") || strings.Contains(low, "проект") || strings.Contains(low, "workspace") {
+			hasFileMention = true
+			break
+		}
+	}
+	if p.SpaceName == "" && req.Model == "" && !hasFileMention {
 		return "", nil
 	}
 	var b strings.Builder
-	if p.SpaceName != "" {
+	if p.SpaceName != "" && hasFileMention {
 		fmt.Fprintf(&b, "Workspace: %s\n", p.SpaceName)
 	}
 	if req.Model != "" {
 		fmt.Fprintf(&b, "Requested model: %s", req.Model)
 	}
-	return strings.TrimSpace(b.String()), nil
+	s := strings.TrimSpace(b.String())
+	if s == "Requested model: "+req.Model && !hasFileMention {
+		// Модель без файлового контекста — не спамим
+		if len(req.Turns) < 2 {
+			return "", nil
+		}
+	}
+	return s, nil
 }
 
-// ToolsHintProvider — если есть тулзы, подсказывает как их звать.
-// Немой — просто кусок текста.
+// ToolsHintProvider — сам проверяет: только если реально есть тулзы
+// и модель может их вызвать (auto/required).
 type ToolsHintProvider struct{ EnabledFlag bool }
 
 func (p *ToolsHintProvider) Name() string  { return "tools-hint" }
@@ -64,6 +101,14 @@ func (p *ToolsHintProvider) Priority() int { return 30 }
 func (p *ToolsHintProvider) Enabled() bool { return p.EnabledFlag }
 func (p *ToolsHintProvider) Provide(_ context.Context, req *Request) (string, error) {
 	if len(req.Tools) == 0 {
+		return "", nil
+	}
+	// Проверяет сам: есть ли в последних сообщениях намёк на тулзы
+	last := ""
+	if len(req.Turns) > 0 {
+		last = strings.ToLower(req.Turns[len(req.Turns)-1].Text)
+	}
+	if strings.Contains(last, "не используй тул") || strings.Contains(last, "без тул") {
 		return "", nil
 	}
 	return "Tools available — model may call them via JSON.", nil

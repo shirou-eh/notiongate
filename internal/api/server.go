@@ -205,6 +205,10 @@ func errCode(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, pool.ErrUnknownModel):
+		return "model_not_found"
+	case errors.Is(err, notion.ErrAINotEnabled):
+		return "ai_not_enabled"
 	case errors.Is(err, notion.ErrAuth):
 		return "auth"
 	case errors.Is(err, notion.ErrRateLimited):
@@ -230,15 +234,19 @@ func userNameFromEmail(email, fallback string) string {
 // markFailure translates an upstream failure into pool state changes and logs.
 // Client-side cancellations are NOT upstream failures: they must not pollute
 // LastError or error metrics.
+//
+// ai_not_enabled: аккаунт СКИПАЕТСЯ — 30m cooldown (не invalid, чтобы мог
+// self-heal если AI включат), квота НЕ тратится (RecordUsage ok=false делает
+// вызывающий код), запрос transparently failover'ится на следующий аккаунт.
+// Клиент видит 403 ai_not_enabled только когда ВСЕ аккаунты перебраны.
 func (s *Server) markFailure(id string, err error) {
 	if errors.Is(err, context.Canceled) {
 		return
 	}
 	switch {
 	case errors.Is(err, notion.ErrAINotEnabled):
-		// Not transient-auth but also not necessarily permanent: cooldown for
-		// 30m instead of terminal invalid so the account can self-heal.
-		s.pool.MarkRateLimited(id, 30*time.Minute, "AI not enabled on this space: "+err.Error())
+		// Скипаем аккаунт: cooldown 30m вместо terminal invalid.
+		s.pool.MarkRateLimited(id, 30*time.Minute, "AI not enabled on this space (code: ai_not_enabled): skipped, failover to next account")
 	case errors.Is(err, notion.ErrAuth):
 		s.pool.MarkAuthFailed(id, err.Error())
 	case errors.Is(err, notion.ErrRateLimited):
@@ -261,10 +269,15 @@ func (s *Server) markFailure(id string, err error) {
 // non-streaming handlers it just collects events.
 //
 // Retry semantics: a failure before any content was produced (HTTP status,
-// auth, rate limit, upstream 5xx, mid-stream error) transparently retries on
-// another account, up to cfg.MaxAttempts distinct accounts per request.
+// auth, rate limit, ai_not_enabled, upstream 5xx, mid-stream error)
+// transparently retries on another account, up to cfg.MaxAttempts distinct
+// accounts per request. ai_not_enabled НЕ тратит квоту и НЕ возвращает 403
+// сразу — аккаунт скипается (30m cooldown), 403 только если все перебраны.
 func (s *Server) runInference(ctx context.Context, job *translate.ChatJob, forward func(notion.Event) error) (runResult, error) {
-	mdl := s.pool.ResolveModel(job.Model)
+	mdl, ok := s.pool.LookupModel(job.Model)
+	if !ok {
+		return runResult{}, pool.ErrUnknownModel
+	}
 	transcript := translate.BuildTranscript(job)
 	inTok := translate.TranscriptInputTokens(transcript)
 	started := time.Now()

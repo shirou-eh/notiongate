@@ -20,6 +20,11 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, translate.BuildAnthropicError("invalid_request_error", err.Error()))
 		return
 	}
+	if job.Model != "" && !s.pool.IsKnownModel(job.Model) {
+		writeJSON(w, http.StatusBadRequest, translate.BuildAnthropicError("invalid_request_error",
+			"unknown model "+job.Model+" (use GET /v1/models)"))
+		return
+	}
 	if !hasMeaningfulContent(job) {
 		writeJSON(w, http.StatusBadRequest, translate.BuildAnthropicError("invalid_request_error", "messages contain no text content"))
 		return

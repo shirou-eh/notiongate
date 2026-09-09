@@ -192,20 +192,35 @@ func TestDisabledExcluded(t *testing.T) {
 func TestResolveModel(t *testing.T) {
 	p := newTestPool(t)
 	acc := mkAcc("a", time.Now())
-	acc.Models = []string{"anthropic-sonnet-4.6", "openai-gpt-5.1"}
+	acc.Models = []string{"sonnet-4.6", "opus-4.8", "oatmeal-cookie"}
 	_ = p.Add(acc)
+	// Точное совпадение (normalized): friendly → codename, codename → codename.
 	cases := map[string]string{
-		"anthropic-sonnet-4.6": "anthropic-sonnet-4.6",
-		"Anthropic-Sonnet-4.6": "anthropic-sonnet-4.6",
-		"sonnet-4.6":           "anthropic-sonnet-4.6",
-		"gpt5":                 "openai-gpt-5.1",
-		"totally-unknown":      "totally-unknown", // passthrough
-		"":                     "",                // server default
+		"sonnet-4.6":         "almond-croissant-low",
+		"Sonnet-4.6":         "almond-croissant-low",
+		"opus-4.8":           "ambrosia-tart-high",
+		"oatmeal-cookie":     "oatmeal-cookie",
+		"gpt-5.2":            "oatmeal-cookie", // из verified таблицы
+		"totally-unknown":    "totally-unknown",
+		"":                   "almond-croissant-low",
 	}
 	for in, want := range cases {
 		if got := p.ResolveModel(in); got != want {
 			t.Errorf("ResolveModel(%q) = %q, want %q", in, got, want)
 		}
+	}
+	// Строгая проверка: неизвестное — это ошибка, а не silent default.
+	if _, ok := p.LookupModel("totally-unknown"); ok {
+		t.Errorf("LookupModel(totally-unknown) ok=true, want false")
+	}
+	if _, ok := p.LookupModel("sonnet-4.6"); !ok {
+		t.Errorf("LookupModel(sonnet-4.6) ok=false, want true")
+	}
+	if _, ok := p.LookupModel("gpt-4o"); ok {
+		t.Errorf("LookupModel(gpt-4o) ok=true, want false (fake alias удалён)")
+	}
+	if !p.IsKnownModel("opus-4.8") || p.IsKnownModel("o1-mini") {
+		t.Errorf("IsKnownModel wrong for opus-4.8/o1-mini")
 	}
 }
 

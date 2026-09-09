@@ -159,16 +159,25 @@ func TestR3NoGhostRowOnBadProxy(t *testing.T) {
 }
 
 // R3-7: model resolution must be deterministic across repeated requests.
+// Строгая семантика: только exact match, никакого fuzzy.
 func TestR3ResolveModelDeterministic(t *testing.T) {
 	p := newTestPool(t)
 	acc := mkAcc("a", time.Now())
 	acc.Models = []string{"e2e-mini", "e2e-model"}
 	_ = p.Add(acc)
-	first := p.ResolveModel("e2e")
+	first := p.ResolveModel("e2e-model")
 	for i := 0; i < 200; i++ {
-		if got := p.ResolveModel("e2e"); got != first {
+		if got := p.ResolveModel("e2e-model"); got != first {
 			t.Fatalf("nondeterministic resolution: %q vs %q", got, first)
 		}
+	}
+	// Подстрока — НЕ модель: LookupModel возвращает false (400), а
+	// ResolveModel для совместимости отдаёт как есть без мутаций.
+	if _, ok := p.LookupModel("e2e"); ok {
+		t.Fatalf("LookupModel(e2e) ok=true, want false (exact match only)")
+	}
+	if got := p.ResolveModel("e2e"); got != "e2e" {
+		t.Fatalf("passthrough mutated: %q", got)
 	}
 	// Control chars must not fuzzy-match everything.
 	if got := p.ResolveModel("\x00"); got != "\x00" {

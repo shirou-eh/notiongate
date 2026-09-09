@@ -608,65 +608,99 @@ func (p *Pool) Snapshot() []AccountView {
 	return out
 }
 
-// ResolveModel maps a client-facing model name onto a Notion model id.
-// Discovery source: models reported by the account, then the built-in
-// codename table. Unknown names are passed through (Notion falls back to its
-// server-side default).
-func (p *Pool) ResolveModel(requested string) string {
+// ErrUnknownModel is returned when the client requests a model that is
+// neither in the live per-account discovery nor in the verified KnownModels
+// table. Silent passthrough to a server default is forbidden: it hides
+// typos and fake aliases (раньше "gpt-4o"/"o1" молча уходили в дефолт).
+var ErrUnknownModel = errors.New("unknown model (use GET /v1/models)")
+
+// LookupModel maps a client-facing model name onto a Notion codename.
+// Sources, in order:
+//  1. live per-account discovery (acc.Models — friendly и codename),
+//  2. verified KnownModels table (friendly → codename, codename → codename).
+//  3. пустая строка → DefaultModel.
+// Exact match only (normalized): никакого fuzzy — fuzzy выбирал не ту модель.
+//
+// ok=false означает неизвестную модель: вызывающий должен ответить
+// 400 model_not_found, а не идти в upstream с выдуманным именем.
+func (p *Pool) LookupModel(requested string) (string, bool) {
+	if requested == "" {
+		return notion.DefaultModel, true
+	}
+	normReq := norm(requested)
+	if normReq == "" {
+		return "", false
+	}
 	p.mu.Lock()
-	// Deterministic build: collect normalized→canonical pairs in account
-	// order, then sort by normalized key so first-wins never depends on map
-	// iteration order (two accounts may report case variants of one model).
 	type pair struct{ n, canon string }
 	var pairs []pair
 	for _, st := range p.accs {
 		for _, m := range st.acc.Models {
+			if m == "" || isLegacyFakeModelID(m) {
+				continue
+			}
 			pairs = append(pairs, pair{norm(m), m})
 		}
 	}
 	p.mu.Unlock()
 	sort.Slice(pairs, func(i, j int) bool { return pairs[i].n < pairs[j].n })
-	known := map[string]string{}
+	discovered := map[string]string{}
 	for _, pr := range pairs {
-		if _, exists := known[pr.n]; !exists {
-			known[pr.n] = pr.canon
+		if _, exists := discovered[pr.n]; !exists {
+			discovered[pr.n] = pr.canon
 		}
 	}
-	if len(known) == 0 {
-		for name, id := range notion.KnownModels {
-			known[norm(name)] = id
-			known[norm(id)] = id
+	// 1. live discovery
+	if canon, ok := discovered[normReq]; ok {
+		return p.toCodename(canon), true
+	}
+	// 2. verified table: friendly и codename
+	for name, code := range notion.KnownModels {
+		if norm(name) == normReq {
+			return code, true
+		}
+		if norm(code) == normReq {
+			return code, true
 		}
 	}
-	if len(known) == 0 || requested == "" {
-		return requested
-	}
-	if canon, ok := known[norm(requested)]; ok {
-		return canon
-	}
-	req := norm(requested)
-	if req == "" {
-		return requested // whitespace/control-char request: no fuzzy match
-	}
-	// Deterministic fuzzy match: collect all candidates, prefer the shortest
-	// canonical id, then lexicographic — never rely on map order.
-	var candidates []string
-	for n, canon := range known {
-		if strings.Contains(n, req) || strings.Contains(req, n) {
-			candidates = append(candidates, canon)
+	return "", false
+}
+
+// toCodename converts a discovered entry (friendly или codename) в codename
+// для ConfigBlock. Неизвестный новый codename возвращается как есть чтобы
+// новая модель из getAvailableModels работала без обновления прокси.
+func (p *Pool) toCodename(canon string) string {
+	for name, code := range notion.KnownModels {
+		if norm(name) == norm(canon) {
+			return code
+		}
+		if code == canon {
+			return canon
 		}
 	}
-	if len(candidates) == 0 {
-		return requested
+	// Discovered codename, которого ещё нет в таблице (новая модель Notion):
+	// пропускаем как есть — upstream его знает.
+	return canon
+}
+
+// IsKnownModel reports whether requested is a usable model id.
+func (p *Pool) IsKnownModel(requested string) bool {
+	_, ok := p.LookupModel(requested)
+	return ok
+}
+
+// ResolveModel maps a client-facing model name onto a Notion model id.
+// Deprecated: используйте LookupModel чтобы отличить неизвестную модель
+// (400) от известной. Оставлен для совместимости: неизвестное имя
+// возвращается как есть, пустое — как DefaultModel.
+func (p *Pool) ResolveModel(requested string) string {
+	if requested == "" {
+		return notion.DefaultModel
 	}
-	sort.Strings(candidates)
-	best := candidates[0]
-	for _, c := range candidates {
-		if len(c) < len(best) {
-			best = c
-		}
+	if code, ok := p.LookupModel(requested); ok {
+		return code
 	}
-	return best
+	return requested
 }
 
 func norm(s string) string {
@@ -677,6 +711,22 @@ func norm(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// isLegacyFakeModelID отбрасывает фейковые id из старых версий
+// ("probe-inconclusive", "default", выдуманные gpt-4o/o1 и т.д.).
+// Они молча уходили в дефолт и врали клиенту — теперь это unknown model.
+func isLegacyFakeModelID(m string) bool {
+	switch norm(m) {
+	case "probeinconclusive", "default", "auto", "notiongate", "notionai",
+		"gpt4o", "gpt4omini", "gpt41", "o1", "o1mini",
+		"gpt5", "deepseekv3", "deepseekr1", "qwen3max", "grok4",
+		"kimik2", "kimik25", "kimi26",
+		"claude35sonnet", "claude3opus", "claudesonnet4", "claudesonnet45",
+		"claudeopus45", "gemini20flash", "gemini15pro", "gemini3pro":
+		return true
+	}
+	return false
 }
 
 // StartRefresher launches the background health checker; blocks until ctx is
@@ -752,11 +802,66 @@ func (p *Pool) refreshOnce(ctx context.Context) {
 					a.CooldownUntil = time.Time{}
 				}
 			})
+			// Best-effort: подтянуть живой каталог моделей если его нет или
+			// там остался легаси-мусор. Не валит health check при ошибке.
+			p.refreshModelsBestEffort(ctx, t.id)
 		}
 		if ctx.Err() != nil {
 			return
 		}
 	}
+}
+
+// refreshModelsBestEffort подтягивает getAvailableModels для аккаунтов без
+// живого каталога (пусто или только легаси-фейки). Ошибки игнорируются.
+func (p *Pool) refreshModelsBestEffort(ctx context.Context, id string) {
+	acc, err := p.Get(id)
+	if err != nil || acc.SpaceID == "" {
+		return
+	}
+	hasReal := false
+	for _, m := range acc.Models {
+		if m != "" && !isLegacyFakeModelID(m) {
+			hasReal = true
+			break
+		}
+	}
+	if hasReal {
+		return
+	}
+	cli, err := p.Client(id)
+	if err != nil {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	avail, err := cli.GetAvailableModels(cctx, acc.SpaceID)
+	if err != nil || len(avail) == 0 {
+		return
+	}
+	friendly := make([]string, 0, len(avail)*2)
+	seen := map[string]bool{}
+	for _, m := range avail {
+		if m.Codename == "" || m.Disabled {
+			continue
+		}
+		name := notion.FriendlyForCodename(m.Codename)
+		if name == "" {
+			name = m.Codename
+		}
+		if !seen[name] {
+			seen[name] = true
+			friendly = append(friendly, name)
+		}
+		if m.Codename != name && !seen[m.Codename] {
+			seen[m.Codename] = true
+			friendly = append(friendly, m.Codename)
+		}
+	}
+	if len(friendly) == 0 {
+		return
+	}
+	_ = p.Update(id, func(a *model.Account) { a.Models = friendly })
 }
 
 // BootstrapToken runs discovery for a raw token_v2 (used by CLI and admin add).

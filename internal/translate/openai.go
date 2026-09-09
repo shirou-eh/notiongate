@@ -182,9 +182,9 @@ type openAIUsage struct {
 }
 
 type openAIMessageOut struct {
-	Role             string          `json:"role"`
-	Content          *string         `json:"content"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	Role             string           `json:"role,omitempty"`
+	Content          *string          `json:"content"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
 	ToolCalls        []openAIToolCall `json:"tool_calls,omitempty"`
 }
 

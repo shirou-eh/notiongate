@@ -227,7 +227,43 @@ func (c *Client) Bootstrap(ctx context.Context) (*BootstrapInfo, error) {
 	default:
 		return info, fmt.Errorf("no AI-enabled space found (all probed spaces answered aiNotEnabled or empty)")
 	}
+	// Живой каталог моделей для выбранного space. Доступ зависит от
+	// плана/feature flags, поэтому discovery — per-space, а не глобальный.
+	// Ошибка discovery НЕ валит bootstrap: fallback — KnownModels.
+	if info.SpaceID != "" {
+		if avail, err := c.GetAvailableModels(ctx, info.SpaceID); err == nil {
+			info.Models = friendlyModelList(avail)
+		}
+	}
 	return info, nil
+}
+
+// friendlyModelList маппит живой ответ getAvailableModels в client-facing
+// имена: только enabled; известным codename — friendly slug, новым
+// (которых ещё нет в KnownModels) — сам codename как есть, чтобы новая
+// модель была доступна сразу без обновления прокси.
+func friendlyModelList(avail []AvailableModel) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range avail {
+		if m.Codename == "" || m.Disabled {
+			continue
+		}
+		name := FriendlyForCodename(m.Codename)
+		if name == "" {
+			name = m.Codename
+		}
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+		// Codename тоже храним как алиас чтобы запрос по codename резолвился.
+		if m.Codename != name && !seen[m.Codename] {
+			seen[m.Codename] = true
+			out = append(out, m.Codename)
+		}
+	}
+	return out
 }
 
 type spaceProbeKind int

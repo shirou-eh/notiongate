@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/shirou-eh/notiongate/internal/notion"
@@ -23,6 +24,12 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	job, err := translate.ParseOpenAI(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_body")
+		return
+	}
+	if job.Model != "" && !s.pool.IsKnownModel(job.Model) {
+		writeError(w, http.StatusBadRequest,
+			"unknown model "+quoteModel(job.Model)+" (use GET /v1/models)",
+			"invalid_request_error", "model_not_found")
 		return
 	}
 	if !hasMeaningfulContent(job) {
@@ -145,6 +152,8 @@ func (s *Server) openAIStream(w http.ResponseWriter, r *http.Request, job *trans
 func (s *Server) writeRunError(w http.ResponseWriter, r *http.Request, err error) {
 	status, errType, code := http.StatusBadGateway, "api_error", "upstream"
 	switch {
+	case errors.Is(err, pool.ErrUnknownModel):
+		status, errType, code = http.StatusBadRequest, "invalid_request_error", "model_not_found"
 	case errors.Is(err, pool.ErrNoAccounts):
 		status, errType, code = http.StatusServiceUnavailable, "server_error", "no_accounts"
 	case errors.Is(err, notion.ErrAuth):
@@ -159,8 +168,13 @@ func (s *Server) writeRunError(w http.ResponseWriter, r *http.Request, err error
 		status, code = http.StatusGatewayTimeout, "timeout"
 	}
 	msg := err.Error()
+	if errors.Is(err, pool.ErrUnknownModel) {
+		msg = "unknown model (use GET /v1/models)"
+	}
 	if code == "ai_not_enabled" {
 		// Sanitized: no raw upstream reflection, even for actionable errors.
+		// Сюда попадаем только когда ВСЕ аккаунты перебраны — каждый
+		// отдельный ai_not_enabled до этого скипается с failover.
 		msg = "Notion AI is not enabled for this account/space (code: ai_not_enabled)"
 	}
 	if errors.Is(err, pool.ErrNoAccounts) {
@@ -225,17 +239,57 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, translate.BuildOpenAIModels(ids))
 }
 
-// modelIDs returns the union of model ids discovered for all pool accounts.
+// quoteModel renders a client-supplied model name safely in errors
+// (длина ограничена чтобы не раздувать ответ).
+func quoteModel(m string) string {
+	if len(m) > 64 {
+		m = m[:64] + "…"
+	}
+	q, _ := json.Marshal(m)
+	return string(q)
+}
+
+// modelIDs returns the union of model ids:
+//  1. live per-account discovery (только enabled — bootstrap уже отфильтровал),
+//  2. verified KnownModels fallback (только enabled, без disabled fable-5).
+//
+// Легаси-мусор ("probe-inconclusive", "default", "auto", "notiongate")
+// отбрасывается: это были фейковые id которые молча уходили в дефолт.
 func (s *Server) modelIDs() []string {
 	seen := map[string]bool{}
 	var ids []string
 	for _, v := range s.pool.Snapshot() {
 		for _, m := range v.Models {
+			if m == "" || isLegacyFakeModel(m) {
+				continue
+			}
 			if !seen[m] {
 				seen[m] = true
 				ids = append(ids, m)
 			}
 		}
 	}
+	// Fallback/union с проверенной таблицей: пул может быть пуст или
+	// discovery ещё не отработал — клиент всё равно видит ВСЕ реальные модели.
+	for _, k := range notion.EnabledFriendlyNames() {
+		if !seen[k] {
+			seen[k] = true
+			ids = append(ids, k)
+		}
+	}
+	sort.Strings(ids)
 	return ids
+}
+
+func isLegacyFakeModel(m string) bool {
+	switch m {
+	case "probe-inconclusive", "default", "auto", "notiongate", "notion-ai",
+		"gpt-4o", "gpt-4o-mini", "gpt-4.1", "o1", "o1-mini",
+		"gpt-5", "deepseek-v3", "deepseek-r1", "qwen-3-max", "grok-4",
+		"kimi-k2", "kimi-k2.5", "kimi-2.6",
+		"claude-3.5-sonnet", "claude-3-opus", "claude-sonnet-4", "claude-sonnet-4.5",
+		"claude-opus-4.5", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-3-pro":
+		return true
+	}
+	return false
 }

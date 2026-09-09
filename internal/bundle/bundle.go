@@ -28,11 +28,11 @@ func DefaultInclude() []string {
 		"data",
 	}
 	// Глобальная БД — всегда включаем, где бы ни был запуск
+	// Добавляем как есть, но addPath перепишет абсолютный путь в data/
 	if home, err := os.UserHomeDir(); err == nil {
 		gdb := filepath.Join(home, ".local", "share", "notiongate", "notiongate.db")
 		if _, err := os.Stat(gdb); err == nil {
 			inc = append(inc, gdb)
-			// WAL тоже
 			for _, suf := range []string{"-wal", "-shm"} {
 				if _, err := os.Stat(gdb + suf); err == nil {
 					inc = append(inc, gdb+suf)
@@ -43,10 +43,23 @@ func DefaultInclude() []string {
 			gdb2 := filepath.Join(xdg, "notiongate", "notiongate.db")
 			if _, err := os.Stat(gdb2); err == nil {
 				inc = append(inc, gdb2)
+				for _, suf := range []string{"-wal", "-shm"} {
+					if _, err := os.Stat(gdb2 + suf); err == nil {
+						inc = append(inc, gdb2+suf)
+					}
+				}
 			}
 		}
 	}
 	return inc
+}
+
+func bundleName(p string) string {
+	// Глобальные абсолютные пути (XDG) в архиве храним как data/...
+	if filepath.IsAbs(p) && strings.Contains(p, "notiongate.db") {
+		return filepath.Join("data", filepath.Base(p))
+	}
+	return p
 }
 
 // Create собирает бандл.
@@ -100,6 +113,12 @@ func addPath(tw *tar.Writer, p string) error {
 	if fi.Mode()&os.ModeSymlink != 0 {
 		return nil
 	}
+	arcName := bundleName(p)
+	// Для Walk нужно чтобы hdr.Name был относительным data/..., а не абсолютным
+	if fi.IsDir() && arcName != p {
+		// Глобальная БД как директория не бывает, но на всякий
+		arcName = p
+	}
 	if fi.IsDir() {
 		return filepath.Walk(p, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -149,7 +168,7 @@ func addPath(tw *tar.Writer, p string) error {
 		})
 	}
 	hdr, _ := tar.FileInfoHeader(fi, "")
-	hdr.Name = p
+	hdr.Name = bundleName(p)
 	m := os.FileMode(hdr.Mode) &^ (os.ModeSetuid | os.ModeSetgid)
 	m = (m & 0o777) | 0o644
 	if m&0o111 != 0 {

@@ -1,0 +1,7 @@
+{
+  "name": "exec-example",
+  "description": "Пример exec-плагина на Python — не требует правок Go",
+  "version": "0.1.0",
+  "command": "./run.py",
+  "timeout": "120s"
+}

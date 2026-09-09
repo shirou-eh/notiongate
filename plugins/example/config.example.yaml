@@ -1,0 +1,7 @@
+# Isolated config for plugins/example.
+# Copy to config.yaml (or config.json) in the same folder — plugin reads it at Init.
+# This file is NEVER committed — add config.yaml to .gitignore inside the plugin folder.
+
+note: "example plugin has no real autoreg — returns mock tokens"
+prefix: "example"
+# Any extra fields you invent are available in ValidateConfig / CreateAccounts via cfg json.

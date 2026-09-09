@@ -1,0 +1,7 @@
+{
+  "mail_domain": "example.com",
+  "mail_api_key": "changeme-mail-api-key",
+  "captcha_key": "changeme-captcha-key",
+  "proxy_url": "socks5://user:pass@127.0.0.1:1080",
+  "use_capsolver": false
+}

@@ -1,0 +1,18 @@
+services:
+  notiongate:
+    build: .
+    container_name: notiongate
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787" # exposition via reverse proxy: set NOTIONGATE_HOST=0.0.0.0 and API_KEY
+    environment:
+      API_KEY: "${API_KEY:?set API_KEY in .env}"
+      ADMIN_KEY: "${ADMIN_KEY:-}"
+      ROTATE_AT: "0.8"
+      DEFAULT_WINDOW: "month"
+      STICKY_SESSIONS: "true"
+      MAX_ATTEMPTS: "3"
+      LOG_LEVEL: "info"
+      TZ: "${TZ:-UTC}"
+    volumes:
+      - ./data:/data

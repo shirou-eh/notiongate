@@ -1,0 +1,39 @@
+# secrets and credentials
+.env
+accounts.json
+notion_account.json
+*.token
+
+# runtime data (contains token_v2 in DB)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# build artifacts
+notiongate
+notiongate.exe
+dist/
+
+# captured curl / debug dumps with session tokens
+input_curl.txt
+*.har
+
+# plugin isolated configs — keep examples, ignore real secrets
+plugins/*/config.json
+plugins/*/config.yaml
+plugins/*/*/config.json
+plugins/*/*/config.yaml
+extensions/*/config.json
+extensions/*/*/config.json
+extensions/*/config.yaml
+!plugins/example/config.example.yaml
+!plugins/autoreg-example/config.example.json
+!plugins/exec-example/config.example.json
+
+# notiongate bundles
+notiongate-bundle-*.tgz
+notiongate2
+notiongate2.exe
+session-*.md
+/tmp/

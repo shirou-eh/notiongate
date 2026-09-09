@@ -81,12 +81,14 @@ func ParseAnthropic(body []byte) (*ChatJob, error) {
 		job.System = append(job.System, sys)
 	}
 	for _, m := range req.Messages {
-		text := extractAnthropicText(m.Content)
+		text, files := extractAnthropicText(m.Content)
 		role := "user"
 		if m.Role == "assistant" {
 			role = "assistant"
 		}
-		job.Turns = append(job.Turns, Turn{Role: role, Text: text})
+		// Handle tool_use blocks that were not in content but as separate tool objects
+		// They are already handled via text placeholder above
+		job.Turns = append(job.Turns, Turn{Role: role, Text: text, Files: files})
 	}
 	return job, nil
 }
@@ -120,28 +122,67 @@ func extractAnthropicSystem(raw json.RawMessage) string {
 	return ""
 }
 
-func extractAnthropicText(raw json.RawMessage) string {
+func extractAnthropicText(raw json.RawMessage) (string, []FileAttachment) {
 	if len(raw) == 0 {
-		return ""
+		return "", nil
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return s
+		return s, nil
 	}
-	var parts []anthropicContentPart
+	var parts []map[string]any
 	if json.Unmarshal(raw, &parts) == nil {
 		var b strings.Builder
+		var files []FileAttachment
 		for _, p := range parts {
-			switch p.Type {
+			t, _ := p["type"].(string)
+			switch t {
 			case "text":
-				b.WriteString(p.Text)
+				if txt, ok := p["text"].(string); ok {
+					b.WriteString(txt)
+				}
+			case "image":
+				src, _ := p["source"].(map[string]any)
+				if src != nil {
+					if data, ok := src["data"].(string); ok {
+						files = append(files, FileAttachment{URL: "data:image/jpeg;base64," + data, ContentType: "image/jpeg"})
+					} else if url, ok := src["url"].(string); ok {
+						files = append(files, FileAttachment{URL: url, ContentType: "image/*"})
+					}
+				}
+			case "document":
+				src, _ := p["source"].(map[string]any)
+				if src != nil {
+					if data, ok := src["data"].(string); ok {
+						files = append(files, FileAttachment{URL: "data:application/pdf;base64," + data, ContentType: "application/pdf"})
+					}
+				}
 			case "tool_result":
-				b.WriteString("[tool_result]")
+				if content, ok := p["content"].(string); ok {
+					b.WriteString("[tool_result] " + content)
+				} else if content, ok := p["content"].([]any); ok {
+					for _, c := range content {
+						if m, ok := c.(map[string]any); ok {
+							if txt, ok := m["text"].(string); ok {
+								b.WriteString(txt)
+							}
+						}
+					}
+				}
+			case "tool_use":
+				if name, ok := p["name"].(string); ok {
+					b.WriteString(fmt.Sprintf("[tool_use %s]", name))
+				}
 			}
 		}
-		return b.String()
+		return b.String(), files
 	}
-	return ""
+	return "", nil
+}
+
+func extractAnthropicTextLegacy(raw json.RawMessage) string {
+	s, _ := extractAnthropicText(raw)
+	return s
 }
 
 // ---- Anthropic response rendering ----

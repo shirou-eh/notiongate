@@ -3,10 +3,12 @@ package notion
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -106,6 +108,8 @@ func (c *Client) RunInferenceStream(ctx context.Context, req *InferenceRequest) 
 		ContextBlock(req.UserID, req.Email, req.UserName, sid, req.SpaceName, req.SpaceViewID),
 	)
 	transcript = append(transcript, turns...)
+	// Process file attachments: download and upload to Notion so they become real file blocks
+	transcript = c.processFileBlocks(ctx, transcript)
 
 	payload := map[string]any{
 		"traceId":                       traceID,
@@ -197,6 +201,115 @@ func pickStr(a, b string) string {
 		return a
 	}
 	return b
+}
+
+func (c *Client) processFileBlocks(ctx context.Context, transcript []TranscriptEntry) []TranscriptEntry {
+	out := make([]TranscriptEntry, 0, len(transcript))
+	for _, e := range transcript {
+		if e.Type != "file" {
+			out = append(out, e)
+			continue
+		}
+		// File block: Value is map with url/filename/content_type
+		m, ok := e.Value.(map[string]any)
+		if !ok {
+			continue
+		}
+		urlStr, _ := m["url"].(string)
+		filename, _ := m["filename"].(string)
+		ctype, _ := m["content_type"].(string)
+		if urlStr == "" {
+			continue
+		}
+		if filename == "" {
+			filename = "file"
+		}
+		if ctype == "" || ctype == "image/*" {
+			ctype = "image/jpeg"
+		}
+		if strings.HasPrefix(ctype, "image/") && ctype == "image/*" {
+			ctype = "image/jpeg"
+		}
+		// Handle data URL
+		var data []byte
+		var err error
+		if strings.HasPrefix(urlStr, "data:") {
+			// data:image/jpeg;base64,...
+			parts := strings.SplitN(urlStr, ",", 2)
+			if len(parts) == 2 {
+				// Check if base64
+				if strings.Contains(parts[0], "base64") {
+					data, err = decodeBase64(parts[1])
+					if err != nil {
+						continue
+					}
+					// Extract content type from data URL
+					if ct := strings.Split(strings.TrimPrefix(parts[0], "data:"), ";")[0]; ct != "" {
+						ctype = ct
+					}
+				} else {
+					data = []byte(parts[1])
+				}
+			}
+		} else {
+			// Download from URL
+			req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+			if err != nil {
+				continue
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				continue
+			}
+			data, err = io.ReadAll(io.LimitReader(resp.Body, 20*1024*1024))
+			resp.Body.Close()
+			if err != nil || len(data) == 0 {
+				continue
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != "" {
+				ctype = strings.Split(ct, ";")[0]
+			}
+		}
+		if len(data) == 0 {
+			continue
+		}
+		// Upload to Notion
+		ref, err := c.UploadFile(ctx, data, filename, ctype)
+		if err != nil {
+			// Fallback: keep as text placeholder
+			out = append(out, TranscriptEntry{
+				ID:   e.ID,
+				Type: "user",
+				Value: [][]string{{"[file: " + filename + " (" + ctype + ")]"}},
+			})
+			continue
+		}
+		// Replace with uploaded file block
+		out = append(out, TranscriptEntry{
+			ID:   ref.ID,
+			Type: "file",
+			Value: map[string]any{
+				"id":   ref.ID,
+				"url":  ref.URL,
+				"name": ref.Name,
+				"type": ref.Type,
+			},
+		})
+	}
+	return out
+}
+
+func decodeBase64(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if m := len(s) % 4; m != 0 {
+		s += strings.Repeat("=", 4-m)
+	}
+	if data, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return data, nil
+	}
+	// Fallback to raw (no padding)
+	s = strings.TrimRight(s, "=")
+	return base64.RawStdEncoding.DecodeString(s)
 }
 
 // streamParser turns the 2026 patch-stream into events.

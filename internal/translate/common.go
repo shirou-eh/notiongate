@@ -5,13 +5,23 @@ package translate
 import (
 	"strings"
 
+	"github.com/shirou-eh/notiongate/internal/model"
 	"github.com/shirou-eh/notiongate/internal/notion"
 )
 
+// FileAttachment represents an image/pdf/document attached to a turn.
+type FileAttachment struct {
+	URL         string `json:"url"`
+	Data        []byte `json:"-"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+}
+
 // Turn is one normalized chat message.
 type Turn struct {
-	Role string // "user" | "assistant"
-	Text string
+	Role  string // "user" | "assistant"
+	Text  string
+	Files []FileAttachment
 }
 
 // Tool — normalized tool definition (OpenAI function / Anthropic tool).
@@ -72,18 +82,25 @@ func BuildTranscript(job *ChatJob) []notion.TranscriptEntry {
 	type run struct {
 		assistant bool
 		texts     []string
+		files     []FileAttachment
 	}
 	var runs []run
 	for _, t := range turns {
-		t.Text = strings.TrimSpace(t.Text)
-		if t.Text == "" {
+		trimmed := strings.TrimSpace(t.Text)
+		hasFiles := len(t.Files) > 0
+		if trimmed == "" && !hasFiles {
 			continue // whitespace-only messages carry nothing to infer
 		}
 		assistant := t.Role == "assistant"
 		if len(runs) == 0 || runs[len(runs)-1].assistant != assistant {
 			runs = append(runs, run{assistant: assistant})
 		}
-		runs[len(runs)-1].texts = append(runs[len(runs)-1].texts, t.Text)
+		if trimmed != "" {
+			runs[len(runs)-1].texts = append(runs[len(runs)-1].texts, trimmed)
+		}
+		if hasFiles {
+			runs[len(runs)-1].files = append(runs[len(runs)-1].files, t.Files...)
+		}
 	}
 
 	var out []notion.TranscriptEntry
@@ -95,10 +112,39 @@ func BuildTranscript(job *ChatJob) []notion.TranscriptEntry {
 			}
 			b.WriteString(txt)
 		}
+		text := b.String()
 		if r.assistant {
-			out = append(out, notion.AssistantBlock(b.String()))
+			if text != "" {
+				out = append(out, notion.AssistantBlock(text))
+			}
+			// Assistant files are not expected, but handle
+			for _, f := range r.files {
+				out = append(out, notion.TranscriptEntry{
+					ID:   model.NewID(),
+					Type: "file",
+					Value: map[string]any{
+						"url":          f.URL,
+						"filename":     f.Filename,
+						"content_type": f.ContentType,
+					},
+				})
+			}
 		} else {
-			out = append(out, notion.UserBlock(b.String()))
+			if text != "" {
+				out = append(out, notion.UserBlock(text))
+			}
+			// Files as separate blocks after text (Notion file blocks)
+			for _, f := range r.files {
+				out = append(out, notion.TranscriptEntry{
+					ID:   model.NewID(),
+					Type: "file",
+					Value: map[string]any{
+						"url":          f.URL,
+						"filename":     f.Filename,
+						"content_type": f.ContentType,
+					},
+				})
+			}
 		}
 	}
 	return out

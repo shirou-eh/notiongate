@@ -85,43 +85,92 @@ func ParseOpenAI(body []byte) (*ChatJob, error) {
 		job.ToolChoice = "auto"
 	}
 	for _, m := range req.Messages {
-		text := extractOpenAIText(m.Content)
+		text, files := extractOpenAITextAndFiles(m.Content)
 		switch m.Role {
 		case "system", "developer":
 			job.System = append(job.System, text)
 		case "assistant":
-			job.Turns = append(job.Turns, Turn{Role: "assistant", Text: text})
+			// Check if this is a tool call (assistant with tool_calls)
+			var aux struct {
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			}
+			if json.Unmarshal(m.Content, &aux) == nil && len(aux.ToolCalls) > 0 {
+				// Tool call — keep as assistant text for context, tools will be extracted
+				job.Turns = append(job.Turns, Turn{Role: "assistant", Text: text, Files: files})
+			} else {
+				job.Turns = append(job.Turns, Turn{Role: "assistant", Text: text, Files: files})
+			}
 		case "tool", "function":
-			job.Turns = append(job.Turns, Turn{Role: "user", Text: "[tool output] " + text})
+			// Tool result — preserve tool name if available
+			toolName := m.Name
+			if toolName != "" {
+				text = fmt.Sprintf("[tool %s result] %s", toolName, text)
+			} else {
+				text = "[tool output] " + text
+			}
+			job.Turns = append(job.Turns, Turn{Role: "user", Text: text, Files: files})
 		default:
-			job.Turns = append(job.Turns, Turn{Role: "user", Text: text})
+			job.Turns = append(job.Turns, Turn{Role: "user", Text: text, Files: files})
 		}
 	}
 	return job, nil
 }
 
 func extractOpenAIText(raw json.RawMessage) string {
+	t, _ := extractOpenAITextAndFiles(raw)
+	return t
+}
+
+func extractOpenAITextAndFiles(raw json.RawMessage) (string, []FileAttachment) {
 	if len(raw) == 0 {
-		return ""
+		return "", nil
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return s
+		return s, nil
 	}
 	var parts []map[string]any
 	if json.Unmarshal(raw, &parts) == nil {
 		var b strings.Builder
+		var files []FileAttachment
 		for _, p := range parts {
-			if t, ok := p["type"].(string); ok && t == "text" {
+			t, _ := p["type"].(string)
+			switch t {
+			case "text":
 				if txt, ok := p["text"].(string); ok {
 					b.WriteString(txt)
+				} else if txtObj, ok := p["text"].(map[string]any); ok {
+					if v, ok := txtObj["value"].(string); ok {
+						b.WriteString(v)
+					}
+				}
+			case "image_url":
+				if img, ok := p["image_url"].(map[string]any); ok {
+					if url, ok := img["url"].(string); ok {
+						files = append(files, FileAttachment{URL: url, ContentType: "image/*"})
+					}
+				}
+			case "image":
+				if url, ok := p["image"].(string); ok {
+					files = append(files, FileAttachment{URL: url, ContentType: "image/*"})
+				}
+			case "file", "document":
+				if f, ok := p["file"].(map[string]any); ok {
+					if url, ok := f["url"].(string); ok {
+						files = append(files, FileAttachment{URL: url, ContentType: "application/pdf"})
+					}
 				}
 			}
-			// image_url and other part types are ignored in v1.
 		}
-		return b.String()
+		return b.String(), files
 	}
-	return ""
+	return "", nil
 }
 
 // ---- OpenAI response rendering ----

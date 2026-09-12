@@ -56,6 +56,20 @@ type ChatJob struct {
 	ToolsPlacement string
 	// ToolsSpecJSON: JSON спеков тулзов для config-плейсмента.
 	ToolsSpecJSON string
+	// ToolsDemo: prepend a compact few-shot demo of a completed tool call
+	// (assistant tool_call marker + tool result + ack) before real turns.
+	// Behavior cloning beats instruction following when the model distrusts
+	// message-embedded tool schemas.
+	ToolsDemo bool
+	// ToolsModel: optional emitter model for tool calls ("reason on MODEL,
+	// emit calls via TOOLS_MODEL"). When the requested model answers text
+	// without tool_calls (strong refusers: Sonnet/Gemini), the proxy asks
+	// ToolsModel to convert plan+specs into tool_calls. Empty = disabled.
+	ToolsModel string
+	// HasToolResults: history already contains tool outputs (mid-chain turn).
+	// The emitter hop fires ONLY on chain initiation — otherwise a text
+	// answer after tool results would re-emit and duplicate writes.
+	HasToolResults bool
 }
 
 // EstimateTokens gives a rough token count (~4 chars/token). Used only when

@@ -54,7 +54,7 @@ func (s *Server) anthropicBlock(w http.ResponseWriter, r *http.Request, job *tra
 	id := translate.NewMessageID()
 	text := notion.FullText(events)
 	if len(job.Tools) > 0 {
-		if calls, clean, ok := s.toolsBridge().ExtractAllowed(text, toolNames(job)); ok {
+		if calls, clean, ok := s.resolveToolCalls(r, job, text); ok {
 			writeJSON(w, http.StatusOK, translate.BuildAnthropicResponseWithTools(id, job.Model, calls, clean, res.InTok, res.OutTok))
 			return
 		}
@@ -165,7 +165,7 @@ func (s *Server) anthropicStreamBuffered(w http.ResponseWriter, r *http.Request,
 	_ = writeSSEEvent(w, "message_start", translate.BuildAnthropicMessageStart(id, job.Model, 0))
 	_ = writeSSEEvent(w, "ping", translate.BuildAnthropicPing())
 	text := notion.FullText(events)
-	if calls, clean, ok := s.toolsBridge().ExtractAllowed(text, toolNames(job)); ok {
+	if calls, clean, ok := s.resolveToolCalls(r, job, text); ok {
 		idx := 0
 		if strings.TrimSpace(clean) != "" {
 			_ = writeSSEEvent(w, "content_block_start", translate.BuildAnthropicBlockStart(idx, translate.AnthropicBlock{Type: "text"}))

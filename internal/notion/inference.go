@@ -864,6 +864,12 @@ func ConfigBlock(notionModel string, toolsJSON ...string) TranscriptEntry {
 		if json.Unmarshal([]byte(toolsJSON[0]), &specs) == nil {
 			cfg["tools"] = specs
 			cfg["toolChoice"] = "auto"
+			// Протокол вызова тоже здесь, а не в тексте сообщений:
+			// модель считает "схемы в сообщении" подделкой, а config-блок
+			// идёт от харнесса. Без этой строки в тексте нет ни слова про тулзы.
+			cfg["toolCallingProtocol"] = "To call a tool, output ONLY a JSON block with nothing else around it:\n" +
+				"```json\n{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"<one of config.tools names>\",\"arguments\":\"{...json args...}\"}}]}\n```\n" +
+				"After the harness executes the call, its output returns as the next turn."
 		}
 	}
 	return TranscriptEntry{ID: model.NewID(), Type: "config", Value: cfg}

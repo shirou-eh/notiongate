@@ -36,6 +36,8 @@ type anthropicRequest struct {
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	Effort          string `json:"effort,omitempty"`
 	ToolsPlacement  string `json:"tools_placement,omitempty"`
+	ToolsDemo       bool   `json:"tools_demo,omitempty"`
+	ToolsModel      string `json:"tools_model,omitempty"`
 }
 
 type anthropicTool struct {
@@ -69,6 +71,8 @@ func ParseAnthropic(body []byte) (*ChatJob, error) {
 		job.Effort = e
 	}
 	job.ToolsPlacement = NormalizePlacement(req.ToolsPlacement)
+	job.ToolsDemo = req.ToolsDemo
+	job.ToolsModel = strings.TrimSpace(req.ToolsModel)
 	for _, t := range req.Tools {
 		if t.Name == "" {
 			continue
@@ -95,6 +99,9 @@ func ParseAnthropic(body []byte) (*ChatJob, error) {
 		role := "user"
 		if m.Role == "assistant" {
 			role = "assistant"
+		}
+		if strings.Contains(string(m.Content), `"tool_result"`) {
+			job.HasToolResults = true
 		}
 		// Handle tool_use blocks that were not in content but as separate tool objects
 		// They are already handled via text placeholder above

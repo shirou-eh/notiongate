@@ -325,3 +325,201 @@ func TestE2EOpenAIToolsTwoTurnLoop(t *testing.T) {
 		t.Fatalf("local file content lost in upstream transcript: %s", mu.bodies[1])
 	}
 }
+
+func TestE2EToolsModelEmitterHop(t *testing.T) {
+	// Мок: reasoner (e2e-model) отвечает прозой без вызовов,
+	// emitter (e2e-mini) отдаёт tool JSON. Проверяем tools_model-цепочку:
+	// отказ первой модели -> вызовы от второй, ответ помечен tools.
+	toolJSON := "```json\n{\"tool_calls\":[{\"id\":\"call_e\",\"type\":\"function\",\"function\":{\"name\":\"Edit\",\"arguments\":\"{\\\"path\\\":\\\"b.txt\\\"}\"}}]}\n```"
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/getSpaces", func(w http.ResponseWriter, r *http.Request) {
+		uid := "u-tool"
+		w.Write([]byte(`{"` + uid + `":{"notion_user":{"` + uid + `":{"value":{"value":{"email":"tool@test.io"}}}}` +
+			`,"space":{"sp-tool":{"spaceId":"sp-tool","value":{"value":{"id":"sp-tool","name":"WS","settings":{"enable_ai_feature":true}}}}}},` +
+			`"space_view":{"sv-tool":{"spaceId":"sp-tool"}}}}`))
+	})
+	mux.HandleFunc("POST /api/v3/getAvailableModels", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"models":[{"model":"e2e-model","modelMessage":"E2E","isDisabled":false},{"model":"e2e-mini","modelMessage":"E2E mini","isDisabled":false}]}`))
+	})
+	emit := func(w http.ResponseWriter, text string) {
+		start, _ := json.Marshal(map[string]any{"type": "patch-start", "data": map[string]any{"s": []any{}}})
+		patch, _ := json.Marshal(map[string]any{
+			"type": "patch",
+			"v": []any{map[string]any{
+				"o": "a", "p": "/s/-",
+				"v": map[string]any{"id": "m1", "type": "agent-inference",
+					"value": []any{map[string]any{"type": "text", "content": text}}},
+			}},
+		})
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		for _, l := range []string{string(start), string(patch)} {
+			_, _ = io.WriteString(w, l+"\n")
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	}
+	mux.HandleFunc("POST /api/v3/runInferenceTranscript", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		text := toolJSON
+		if !strings.Contains(string(body), `"model":"e2e-mini"`) {
+			text = "plain refusal prose, no calls here"
+		}
+		emit(w, text)
+	})
+	mock := httptest.NewServer(mux)
+	t.Cleanup(mock.Close)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "e2e-tools-emit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := &config.Config{
+		Host: "127.0.0.1", Port: 0,
+		APIKey: "sk-test", AdminKey: "adm",
+		RotateAt: 0.8, DefaultWindow: "month", DefaultLimit: 0,
+		StickySessions: false, MaxAttempts: 3,
+		UpstreamTimeout: 30 * time.Second, RefreshInterval: time.Hour,
+		NotionBaseURL: mock.URL, NotionClientVersion: "test", UserAgent: "ua",
+	}
+	p, err := pool.New(cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Add(model.Account{ID: "acc-tool", Label: "tool", TokenV2: "toktool",
+		UserID: "u-tool", SpaceID: "sp-tool", Status: model.StatusActive,
+		Models: []string{"e2e-model", "e2e-mini"}, LastUsed: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(cfg, p, st).Handler())
+	t.Cleanup(ts.Close)
+
+	resp, body := postJSON(t, ts.URL+"/v1/chat/completions", "sk-test", map[string]any{
+		"model": "e2e-model",
+		"messages": []map[string]any{
+			{"role": "user", "content": "создай файл b.txt"},
+		},
+		"tools": []map[string]any{
+			{"type": "function", "function": map[string]any{"name": "Edit", "description": "edit", "parameters": map[string]any{"type": "object"}}},
+		},
+		"tool_choice": "auto",
+		"tools_model": "e2e-mini",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	var out struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				ToolCalls []struct {
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Choices[0].FinishReason != "tool_calls" || len(out.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("emitter hop must produce tool_calls: %s", body)
+	}
+	if out.Choices[0].Message.ToolCalls[0].Function.Name != "Edit" {
+		t.Fatalf("wrong call: %s", body)
+	}
+}
+
+func TestE2EToolsModelNoDupMidChain(t *testing.T) {
+	// История уже содержит tool result + tools_model задан: hop обязан НЕ
+	// стрелять повторно (иначе двойная запись файла). Ровно 1 апстрим-вызов.
+	var calls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/getSpaces", func(w http.ResponseWriter, r *http.Request) {
+		uid := "u-tool"
+		w.Write([]byte(`{"` + uid + `":{"notion_user":{"` + uid + `":{"value":{"value":{"email":"tool@test.io"}}}}` +
+			`,"space":{"sp-tool":{"spaceId":"sp-tool","value":{"value":{"id":"sp-tool","name":"WS","settings":{"enable_ai_feature":true}}}}}},` +
+			`"space_view":{"sv-tool":{"spaceId":"sp-tool"}}}}`))
+	})
+	mux.HandleFunc("POST /api/v3/getAvailableModels", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"models":[{"model":"e2e-model","modelMessage":"E2E","isDisabled":false},{"model":"e2e-mini","modelMessage":"E2E mini","isDisabled":false}]}`))
+	})
+	mux.HandleFunc("POST /api/v3/runInferenceTranscript", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.ReadAll(r.Body)
+		start, _ := json.Marshal(map[string]any{"type": "patch-start", "data": map[string]any{"s": []any{}}})
+		patch, _ := json.Marshal(map[string]any{
+			"type": "patch",
+			"v": []any{map[string]any{
+				"o": "a", "p": "/s/-",
+				"v": map[string]any{"id": "m1", "type": "agent-inference",
+					"value": []any{map[string]any{"type": "text", "content": "Done, file written."}}},
+			}},
+		})
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		for _, l := range []string{string(start), string(patch)} {
+			_, _ = io.WriteString(w, l+"\n")
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	})
+	mock := httptest.NewServer(mux)
+	t.Cleanup(mock.Close)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "e2e-tools-nodup.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := &config.Config{
+		Host: "127.0.0.1", Port: 0,
+		APIKey: "sk-test", AdminKey: "adm",
+		RotateAt: 0.8, DefaultWindow: "month", DefaultLimit: 0,
+		StickySessions: false, MaxAttempts: 3,
+		UpstreamTimeout: 30 * time.Second, RefreshInterval: time.Hour,
+		NotionBaseURL: mock.URL, NotionClientVersion: "test", UserAgent: "ua",
+	}
+	p, err := pool.New(cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Add(model.Account{ID: "acc-tool", Label: "tool", TokenV2: "toktool",
+		UserID: "u-tool", SpaceID: "sp-tool", Status: model.StatusActive,
+		Models: []string{"e2e-model", "e2e-mini"}, LastUsed: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(cfg, p, st).Handler())
+	t.Cleanup(ts.Close)
+
+	resp, body := postJSON(t, ts.URL+"/v1/chat/completions", "sk-test", map[string]any{
+		"model": "e2e-model",
+		"messages": []map[string]any{
+			{"role": "user", "content": "создай файл b.txt"},
+			{"role": "assistant", "content": nil, "tool_calls": []map[string]any{
+				{"id": "call_1", "type": "function", "function": map[string]any{"name": "Edit", "arguments": "{}"}},
+			}},
+			{"role": "tool", "tool_call_id": "call_1", "name": "Edit", "content": "written"},
+		},
+		"tools": []map[string]any{
+			{"type": "function", "function": map[string]any{"name": "Edit", "description": "edit", "parameters": map[string]any{"type": "object"}}},
+		},
+		"tool_choice": "auto",
+		"tools_model": "e2e-mini",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	if calls != 1 {
+		t.Fatalf("mid-chain must cost exactly 1 upstream call, got %d", calls)
+	}
+	if !strings.Contains(string(body), "Done, file written.") {
+		t.Fatalf("expected text answer: %s", body)
+	}
+}

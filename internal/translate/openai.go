@@ -35,6 +35,8 @@ type openAIRequest struct {
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	Effort          string `json:"effort,omitempty"`
 	ToolsPlacement  string `json:"tools_placement,omitempty"`
+	ToolsDemo       bool   `json:"tools_demo,omitempty"`
+	ToolsModel      string `json:"tools_model,omitempty"`
 }
 
 type openAITool struct {
@@ -69,6 +71,8 @@ func ParseOpenAI(body []byte) (*ChatJob, error) {
 		job.Effort = e
 	}
 	job.ToolsPlacement = NormalizePlacement(req.ToolsPlacement)
+	job.ToolsDemo = req.ToolsDemo
+	job.ToolsModel = strings.TrimSpace(req.ToolsModel)
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 	if includeUsage {
 		job.StreamUsage = true
@@ -140,6 +144,7 @@ func ParseOpenAI(body []byte) (*ChatJob, error) {
 				}
 			}
 		case "tool", "function":
+			job.HasToolResults = true
 			// Tool result — сохраняем tool_call_id чтобы модель видела
 			// какой вызов отработал. Файлы правит агент на компе
 			// пользователя, прокси только честно возит результаты.

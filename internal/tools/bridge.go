@@ -142,6 +142,24 @@ func (b *Bridge) ExtractAllowed(text string, allowed []string) ([]Call, string, 
 		// arguments может прийти объектом {...} — нормализуем к строке.
 		// Пустой/null → "{}".
 		trimmed := strings.TrimSpace(args)
+		// Модели иногда заворачивают объект в лишнюю JSON-строку:
+		// "\"{\\\"path\\\":...}\"" — разворачиваем один раз, иначе
+		// агентский json.loads даст строку вместо объекта.
+		// Живой кейс: gpt-5.4-nano через notiongate, 2026-09-12.
+		if strings.HasPrefix(trimmed, `"`) {
+			var s string
+			if json.Unmarshal([]byte(trimmed), &s) == nil {
+				if inner := strings.TrimSpace(s); inner != "" {
+					var v any
+					if json.Unmarshal([]byte(inner), &v) == nil {
+						switch v.(type) {
+						case map[string]any, []any:
+							trimmed = inner
+						}
+					}
+				}
+			}
+		}
 		if trimmed == "" || trimmed == "null" {
 			args = "{}"
 		} else if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {

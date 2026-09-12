@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -61,5 +62,26 @@ func TestPromptInjectionStatesToolsAreReal(t *testing.T) {
 	p := DefaultBridge.PromptInjection([]Tool{{Name: "Edit", Description: "edit"}}, "auto")
 	if !strings.Contains(p, "not role-play") || !strings.Contains(p, "harness executes") {
 		t.Fatalf("injection must address the pretend-output refusal: %q", p)
+	}
+}
+
+func TestExtractAllowed_UnwrapsDoubleEncodedArgs(t *testing.T) {
+	// Живой кейс gpt-5.4-nano 2026-09-12: arguments — JSON-строка в строке.
+	inner, _ := json.Marshal(map[string]string{"path": "a.txt"})
+	once, _ := json.Marshal(string(inner)) // двойное кодирование моделью
+	wrapper, _ := json.Marshal(map[string]any{"tool_calls": []any{map[string]any{
+		"id": "call_1", "type": "function",
+		"function": map[string]any{"name": "Edit", "arguments": json.RawMessage(once)},
+	}}})
+	calls, _, ok := DefaultBridge.ExtractAllowed(string(wrapper), []string{"Edit"})
+	if !ok || len(calls) != 1 {
+		t.Fatalf("extract failed: %+v", calls)
+	}
+	var v map[string]any
+	if err := json.Unmarshal([]byte(calls[0].Arguments), &v); err != nil {
+		t.Fatalf("args not unwrapped to object: %q", calls[0].Arguments)
+	}
+	if v["path"] != "a.txt" {
+		t.Fatalf("args = %v", v)
 	}
 }

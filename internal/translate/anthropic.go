@@ -139,6 +139,9 @@ func extractAnthropicText(raw json.RawMessage) (string, []FileAttachment) {
 			switch t {
 			case "text":
 				if txt, ok := p["text"].(string); ok {
+					if b.Len() > 0 {
+						b.WriteString("\n")
+					}
 					b.WriteString(txt)
 				}
 			case "image":
@@ -158,20 +161,60 @@ func extractAnthropicText(raw json.RawMessage) (string, []FileAttachment) {
 					}
 				}
 			case "tool_result":
-				if content, ok := p["content"].(string); ok {
-					b.WriteString("[tool_result] " + content)
-				} else if content, ok := p["content"].([]any); ok {
+				// Сохраняем tool_use_id чтобы не рвалась связка вызов→результат.
+				tid, _ := p["tool_use_id"].(string)
+				contentStr := ""
+				switch content := p["content"].(type) {
+				case string:
+					contentStr = content
+				case []any:
+					var cb strings.Builder
 					for _, c := range content {
 						if m, ok := c.(map[string]any); ok {
 							if txt, ok := m["text"].(string); ok {
-								b.WriteString(txt)
+								cb.WriteString(txt)
+							} else if js, err := json.Marshal(m); err == nil {
+								cb.WriteString(string(js))
 							}
+						} else if s, ok := c.(string); ok {
+							cb.WriteString(s)
 						}
 					}
+					contentStr = cb.String()
+				default:
+					if bb, err := json.Marshal(p["content"]); err == nil && string(bb) != "null" {
+						contentStr = string(bb)
+					}
+				}
+				if strings.TrimSpace(contentStr) == "" {
+					contentStr = "{}"
+				}
+				if b.Len() > 0 {
+					b.WriteString("\n")
+				}
+				if tid != "" {
+					fmt.Fprintf(&b, "[tool_result id=%s] %s", tid, contentStr)
+				} else {
+					b.WriteString("[tool_result] " + contentStr)
 				}
 			case "tool_use":
-				if name, ok := p["name"].(string); ok {
-					b.WriteString(fmt.Sprintf("[tool_use %s]", name))
+				// Сохраняем id/name/input целиком — иначе следующий шаг
+				// агента теряет контекст вызова.
+				id, _ := p["id"].(string)
+				name, _ := p["name"].(string)
+				inputStr := "{}"
+				if inp, ok := p["input"]; ok && inp != nil {
+					if bb, err := json.Marshal(inp); err == nil && string(bb) != "null" {
+						inputStr = string(bb)
+					}
+				}
+				if b.Len() > 0 {
+					b.WriteString("\n")
+				}
+				if id != "" || name != "" {
+					fmt.Fprintf(&b, "[tool_use id=%s name=%s input=%s]", id, name, inputStr)
+				} else if name, ok := p["name"].(string); ok {
+					fmt.Fprintf(&b, "[tool_use %s]", name)
 				}
 			}
 		}
@@ -304,6 +347,28 @@ func BuildAnthropicThinkingDelta(index int, thinking string) []byte {
 
 func BuildAnthropicBlockStop(index int) []byte {
 	b, _ := json.Marshal(map[string]any{"type": "content_block_stop", "index": index})
+	return b
+}
+
+// BuildAnthropicToolStart — content_block_start для tool_use.
+// Агент исполнит вызов локально (файлы на компе пользователя).
+func BuildAnthropicToolStart(index int, id, name string) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"type": "content_block_start", "index": index,
+		"content_block": map[string]any{"type": "tool_use", "id": id, "name": name, "input": map[string]any{}},
+	})
+	return b
+}
+
+// BuildAnthropicToolDelta — input_json_delta куском.
+func BuildAnthropicToolDelta(index int, inputJSON string) []byte {
+	if strings.TrimSpace(inputJSON) == "" {
+		inputJSON = "{}"
+	}
+	b, _ := json.Marshal(map[string]any{
+		"type": "content_block_delta", "index": index,
+		"delta": map[string]any{"type": "input_json_delta", "partial_json": inputJSON},
+	})
 	return b
 }
 

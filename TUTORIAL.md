@@ -18,7 +18,7 @@ curl http://127.0.0.1:8787/healthz
 ```python
 from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="any")
-client.chat.completions.create(model="claude-sonnet-4.6", messages=[{"role":"user","content":"Привет!"}])
+client.chat.completions.create(model="sonnet-5", messages=[{"role":"user","content":"Привет!"}])
 ```
 `Ctrl+C` весь текст (до 100k + картинки/PDF) → `Ctrl+V` в чат → `Enter` — один вызов, 2–5 мин reasoning.
 

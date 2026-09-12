@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/shirou-eh/notiongate/internal/notion"
@@ -59,11 +60,12 @@ func (s *Server) openAIBlock(w http.ResponseWriter, r *http.Request, job *transl
 		return
 	}
 	id := translate.NewCompletionID()
-	// Авто-извлечение тулзов — всегда пробуем, даже если клиент не просил.
-	// Если модель вернула JSON с tool_calls, отдаём их в правильном формате.
+	// Passthrough клиентских тулзов: разрешённые имена берём из запроса.
+	// Файлы правит агент на компе пользователя — прокси только честно
+	// возит tool_calls туда-обратно, ничего не исполняя сам.
 	text := notion.FullText(events)
 	if len(job.Tools) > 0 || len(text) > 0 {
-		if calls, clean, ok := s.toolsBridge().Extract(text); ok {
+		if calls, clean, ok := s.toolsBridge().ExtractAllowed(text, toolNames(job)); ok {
 			writeJSON(w, http.StatusOK, translate.BuildOpenAIResponseWithTools(id, job.Model, calls, clean, notion.ReasoningText(events), res.InTok, res.OutTok))
 			return
 		}
@@ -71,11 +73,32 @@ func (s *Server) openAIBlock(w http.ResponseWriter, r *http.Request, job *transl
 	writeJSON(w, http.StatusOK, translate.BuildOpenAIResponse(id, job.Model, events, res.InTok, res.OutTok))
 }
 
+func toolNames(job *translate.ChatJob) []string {
+	if job == nil || len(job.Tools) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(job.Tools))
+	for _, t := range job.Tools {
+		if t.Name != "" {
+			out = append(out, t.Name)
+		}
+	}
+	return out
+}
+
 func (s *Server) toolsBridge() *tools.Bridge {
 	return tools.DefaultBridge
 }
 
 func (s *Server) openAIStream(w http.ResponseWriter, r *http.Request, job *translate.ChatJob) {
+	// Агентный режим (есть tools): стрим текстом ломает tool_calls —
+	// агентам нужен валидный tool_calls-чанк, а не кусочки JSON в content.
+	// Поэтому буферим ответ целиком, потом отдаём либо tool_calls-стрим,
+	// либо обычный текстовый стрим. Файлы правит агент локально.
+	if len(job.Tools) > 0 {
+		s.openAIStreamBuffered(w, r, job)
+		return
+	}
 	id := translate.NewCompletionID()
 	var (
 		wroteHeader bool
@@ -148,6 +171,69 @@ func (s *Server) openAIStream(w http.ResponseWriter, r *http.Request, job *trans
 	_ = res // result already recorded by the executor
 }
 
+// openAIStreamBuffered — стрим для агентного режима (job.Tools != nil).
+// Собирает весь текст, потом:
+//   - если есть tool_calls → отдаёт их валидными tool_calls-чанками
+//     (агент исполнит их ЛОКАЛЬНО: правит файлы на компе пользователя);
+//   - иначе → отдаёт текст обычным стримом одним куском.
+func (s *Server) openAIStreamBuffered(w http.ResponseWriter, r *http.Request, job *translate.ChatJob) {
+	id := translate.NewCompletionID()
+	var events []notion.Event
+	res, err := s.runInference(r.Context(), job, func(ev notion.Event) error {
+		events = append(events, ev)
+		return nil
+	})
+	if err != nil {
+		// Ничего ещё не писали — можно отдать обычный JSON-ошибку,
+		// но стрим-клиенты ждут SSE: отдаём SSE-заголовки + error-чанк.
+		writeSSEHeaders(w)
+		slog.Warn("api: mid-stream failure", "err", err)
+		_ = writeSSEData(w, []byte(`{"error":{"message":"upstream stream failed","type":"api_error","code":"upstream"}}`))
+		_ = writeSSEData(w, []byte("[DONE]"))
+		return
+	}
+	text := notion.FullText(events)
+	reasoning := notion.ReasoningText(events)
+	writeSSEHeaders(w)
+	// role first
+	_ = writeSSEData(w, translate.BuildOpenAIChunk(id, job.Model, true, "", "", nil))
+	if calls, clean, ok := s.toolsBridge().ExtractAllowed(text, toolNames(job)); ok {
+		// tool_calls стрим: первый чанк с именами, потом аргументы кусками
+		for i, c := range calls {
+			_ = writeSSEData(w, translate.BuildOpenAIToolChunk(id, job.Model, i, c.ID, c.Name, c.Arguments, true))
+		}
+		if strings.TrimSpace(clean) != "" {
+			_ = writeSSEData(w, translate.BuildOpenAIChunk(id, job.Model, false, clean, "", nil))
+		} else if reasoning != "" {
+			_ = writeSSEData(w, translate.BuildOpenAIChunk(id, job.Model, false, "", reasoning, nil))
+		}
+		finish := "tool_calls"
+		_ = writeSSEData(w, translate.BuildOpenAIChunk(id, job.Model, false, "", "", &finish))
+	} else {
+		if text != "" {
+			_ = writeSSEData(w, translate.BuildOpenAIChunk(id, job.Model, false, text, reasoning, nil))
+		} else if reasoning != "" {
+			_ = writeSSEData(w, translate.BuildOpenAIChunk(id, job.Model, false, "", reasoning, nil))
+		}
+		finish := "stop"
+		_ = writeSSEData(w, translate.BuildOpenAIChunk(id, job.Model, false, "", "", &finish))
+	}
+	if job.StreamUsage {
+		usageChunk := map[string]any{
+			"id": id, "object": "chat.completion.chunk", "created": time.Now().Unix(),
+			"model":   job.Model,
+			"choices": []any{},
+			"usage": map[string]any{
+				"prompt_tokens": res.InTok, "completion_tokens": res.OutTok,
+				"total_tokens": res.InTok + res.OutTok,
+			},
+		}
+		b, _ := json.Marshal(usageChunk)
+		_ = writeSSEData(w, b)
+	}
+	_ = writeSSEData(w, []byte("[DONE]"))
+}
+
 // writeRunError maps executor errors onto client-facing HTTP errors.
 func (s *Server) writeRunError(w http.ResponseWriter, r *http.Request, err error) {
 	status, errType, code := http.StatusBadGateway, "api_error", "upstream"
@@ -160,6 +246,8 @@ func (s *Server) writeRunError(w http.ResponseWriter, r *http.Request, err error
 		status, code = http.StatusBadGateway, "upstream_auth"
 	case errors.Is(err, notion.ErrAINotEnabled):
 		status, code = http.StatusForbidden, "ai_not_enabled"
+	case errors.Is(err, notion.ErrModelDisabled):
+		status, code = http.StatusForbidden, "model_disabled"
 	case errors.Is(err, pool.ErrTooBusy):
 		status, code = http.StatusServiceUnavailable, "too_busy"
 	case errors.Is(err, notion.ErrRateLimited):
@@ -176,6 +264,9 @@ func (s *Server) writeRunError(w http.ResponseWriter, r *http.Request, err error
 		// Сюда попадаем только когда ВСЕ аккаунты перебраны — каждый
 		// отдельный ai_not_enabled до этого скипается с failover.
 		msg = "Notion AI is not enabled for this account/space (code: ai_not_enabled)"
+	}
+	if code == "model_disabled" {
+		msg = "model is disabled for this plan (code: model_disabled)"
 	}
 	if errors.Is(err, pool.ErrNoAccounts) {
 		msg = "no usable Notion accounts in the pool (all exhausted, cooling down or invalid)"

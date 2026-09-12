@@ -154,13 +154,36 @@ func (s *Server) handleAdminDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminTest implements POST /admin/accounts/{id}/test.
+//
+// ?ai=1 (default) также прогоняет AI-пробу: Ping не видит ai_not_enabled,
+// поэтому session ok + ai ok возвращаются отдельно.
 func (s *Server) handleAdminTest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	err := s.pool.TestAccount(ctx, r.PathValue("id"))
-	resp := map[string]any{"ok": err == nil}
+	resp := map[string]any{"ok": err == nil, "session_ok": err == nil}
 	if err != nil {
 		resp["error"] = err.Error()
+		writeJSONRaw(w, http.StatusOK, resp)
+		return
+	}
+	if r.URL.Query().Get("ai") == "0" {
+		writeJSONRaw(w, http.StatusOK, resp)
+		return
+	}
+	actx, acancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer acancel()
+	probe := s.pool.ProbeAI(actx, r.PathValue("id"))
+	resp["ai_ok"] = probe.AIOK
+	if len(probe.Models) > 0 {
+		resp["models"] = probe.Models
+	}
+	if probe.Error != "" {
+		resp["ai_error"] = probe.Error
+	}
+	resp["ok"] = probe.AIOK
+	if !probe.AIOK && resp["error"] == nil {
+		resp["error"] = probe.Error
 	}
 	writeJSONRaw(w, http.StatusOK, resp)
 }

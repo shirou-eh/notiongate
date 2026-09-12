@@ -54,7 +54,7 @@ func (s *Server) anthropicBlock(w http.ResponseWriter, r *http.Request, job *tra
 	id := translate.NewMessageID()
 	text := notion.FullText(events)
 	if len(job.Tools) > 0 {
-		if calls, clean, ok := s.toolsBridge().Extract(text); ok {
+		if calls, clean, ok := s.toolsBridge().ExtractAllowed(text, toolNames(job)); ok {
 			writeJSON(w, http.StatusOK, translate.BuildAnthropicResponseWithTools(id, job.Model, calls, clean, res.InTok, res.OutTok))
 			return
 		}
@@ -65,6 +65,12 @@ func (s *Server) anthropicBlock(w http.ResponseWriter, r *http.Request, job *tra
 // anthropicStream implements Anthropic SSE: message_start, content blocks,
 // message_delta, message_stop. Thinking and text map to separate blocks.
 func (s *Server) anthropicStream(w http.ResponseWriter, r *http.Request, job *translate.ChatJob) {
+	// Агентный режим: буферим чтобы tool_calls отдать валидными
+	// tool_use-блоками, а не кусками JSON в тексте.
+	if len(job.Tools) > 0 {
+		s.anthropicStreamBuffered(w, r, job)
+		return
+	}
 	id := translate.NewMessageID()
 	var (
 		wroteHeader bool
@@ -137,6 +143,56 @@ func (s *Server) anthropicStream(w http.ResponseWriter, r *http.Request, job *tr
 		return
 	}
 	closeBlock()
+	_ = writeSSEEvent(w, "message_delta", translate.BuildAnthropicMessageDelta(res.OutTok))
+	_ = writeSSEEvent(w, "message_stop", translate.BuildAnthropicMessageStop())
+}
+
+// anthropicStreamBuffered — стрим для агентного режима.
+// tool_calls исполняются ЛОКАЛЬНО агентом (файлы на компе пользователя),
+// прокси только отдаёт валидные tool_use-блоки.
+func (s *Server) anthropicStreamBuffered(w http.ResponseWriter, r *http.Request, job *translate.ChatJob) {
+	id := translate.NewMessageID()
+	var events []notion.Event
+	res, err := s.runInference(r.Context(), job, func(ev notion.Event) error {
+		events = append(events, ev)
+		return nil
+	})
+	if err != nil {
+		s.writeRunError(w, r, err)
+		return
+	}
+	writeSSEHeaders(w)
+	_ = writeSSEEvent(w, "message_start", translate.BuildAnthropicMessageStart(id, job.Model, 0))
+	_ = writeSSEEvent(w, "ping", translate.BuildAnthropicPing())
+	text := notion.FullText(events)
+	if calls, clean, ok := s.toolsBridge().ExtractAllowed(text, toolNames(job)); ok {
+		idx := 0
+		if strings.TrimSpace(clean) != "" {
+			_ = writeSSEEvent(w, "content_block_start", translate.BuildAnthropicBlockStart(idx, translate.AnthropicBlock{Type: "text"}))
+			_ = writeSSEEvent(w, "content_block_delta", translate.BuildAnthropicTextDelta(idx, clean))
+			_ = writeSSEEvent(w, "content_block_stop", translate.BuildAnthropicBlockStop(idx))
+			idx++
+		}
+		for _, c := range calls {
+			_ = writeSSEEvent(w, "content_block_start", translate.BuildAnthropicToolStart(idx, c.ID, c.Name))
+			_ = writeSSEEvent(w, "content_block_delta", translate.BuildAnthropicToolDelta(idx, c.Arguments))
+			_ = writeSSEEvent(w, "content_block_stop", translate.BuildAnthropicBlockStop(idx))
+			idx++
+		}
+	} else {
+		idx := 0
+		if reasoning := notion.ReasoningText(events); reasoning != "" {
+			_ = writeSSEEvent(w, "content_block_start", translate.BuildAnthropicBlockStart(idx, translate.AnthropicBlock{Type: "thinking"}))
+			_ = writeSSEEvent(w, "content_block_delta", translate.BuildAnthropicThinkingDelta(idx, reasoning))
+			_ = writeSSEEvent(w, "content_block_stop", translate.BuildAnthropicBlockStop(idx))
+			idx++
+		}
+		if text != "" {
+			_ = writeSSEEvent(w, "content_block_start", translate.BuildAnthropicBlockStart(idx, translate.AnthropicBlock{Type: "text"}))
+			_ = writeSSEEvent(w, "content_block_delta", translate.BuildAnthropicTextDelta(idx, text))
+			_ = writeSSEEvent(w, "content_block_stop", translate.BuildAnthropicBlockStop(idx))
+		}
+	}
 	_ = writeSSEEvent(w, "message_delta", translate.BuildAnthropicMessageDelta(res.OutTok))
 	_ = writeSSEEvent(w, "message_stop", translate.BuildAnthropicMessageStop())
 }

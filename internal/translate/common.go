@@ -34,6 +34,7 @@ type Tool struct {
 type ChatJob struct {
 	Model    string // client-facing model name
 	UserKey  string // sticky session key
+	UserID   string // Notion-side user id (stamped onto user transcript blocks)
 	Protocol string // "openai" | "anthropic"
 	Stream   bool
 	// StreamUsage: OpenAI stream_options.include_usage — emit a final usage
@@ -131,7 +132,9 @@ func BuildTranscript(job *ChatJob) []notion.TranscriptEntry {
 			}
 		} else {
 			if text != "" {
-				out = append(out, notion.UserBlock(text))
+				e := notion.UserBlock(text)
+				e.UserID = job.UserID // "" ок — RunInferenceStream доштампует из аккаунта
+				out = append(out, e)
 			}
 			// Files as separate blocks after text (Notion file blocks)
 			for _, f := range r.files {

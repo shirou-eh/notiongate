@@ -227,43 +227,46 @@ func (c *Client) Bootstrap(ctx context.Context) (*BootstrapInfo, error) {
 	default:
 		return info, fmt.Errorf("no AI-enabled space found (all probed spaces answered aiNotEnabled or empty)")
 	}
-	// Живой каталог моделей для выбранного space. Доступ зависит от
-	// плана/feature flags, поэтому discovery — per-space, а не глобальный.
-	// Ошибка discovery НЕ валит bootstrap: fallback — KnownModels.
-	if info.SpaceID != "" {
-		if avail, err := c.GetAvailableModels(ctx, info.SpaceID); err == nil {
-			info.Models = friendlyModelList(avail)
-		}
-	}
+	// Живой каталог моделей: union по ВСЕМ space аккаунта, а не только
+	// выбранного. Доступ зависит от плана/feature flags per-space: выбранный
+	// рабочий space может иметь меньше моделей, чем соседний. Ошибка
+	// discovery НЕ валит bootstrap: fallback — KnownModels.
+	info.Models = c.discoverAllSpacesModels(ctx, spaces)
 	return info, nil
 }
 
-// friendlyModelList маппит живой ответ getAvailableModels в client-facing
-// имена: только enabled; известным codename — friendly slug, новым
-// (которых ещё нет в KnownModels) — сам codename как есть, чтобы новая
-// модель была доступна сразу без обновления прокси.
-func friendlyModelList(avail []AvailableModel) []string {
+// discoverAllSpacesModels опрашивает getAvailableModels для каждого space и
+// объединяет enabled-модели. Каждый space опрашивается с коротким таймаутом
+// чтобы один висящий workspace не тормозил весь bootstrap.
+func (c *Client) discoverAllSpacesModels(ctx context.Context, spaces []SpaceInfo) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, m := range avail {
-		if m.Codename == "" || m.Disabled {
+	for _, s := range spaces {
+		if s.ID == "" {
 			continue
 		}
-		name := FriendlyForCodename(m.Codename)
-		if name == "" {
-			name = m.Codename
+		sctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		avail, err := c.GetAvailableModels(sctx, s.ID)
+		cancel()
+		if err != nil || len(avail) == 0 {
+			continue
 		}
-		if !seen[name] {
-			seen[name] = true
-			out = append(out, name)
+		for _, name := range friendlyModelList(avail) {
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
 		}
-		// Codename тоже храним как алиас чтобы запрос по codename резолвился.
-		if m.Codename != name && !seen[m.Codename] {
-			seen[m.Codename] = true
-			out = append(out, m.Codename)
+		if ctx.Err() != nil {
+			break
 		}
 	}
 	return out
+}
+
+// friendlyModelList — wrapper для совместимости, см. FriendlyModelList.
+func friendlyModelList(avail []AvailableModel) []string {
+	return FriendlyModelList(avail)
 }
 
 type spaceProbeKind int
@@ -319,6 +322,11 @@ func (c *Client) probeSpace(ctx context.Context, userID string, s SpaceInfo) spa
 	}
 	events, cancel2, err := c.RunInferenceStream(pctx, req)
 	if err != nil {
+		// Сетевой ai_not_enabled (HTTP 403 с телом) — это точно disabled,
+		// а не "неизвестно": space скипается, а не выбирается fallback'ом.
+		if isAINotEnabledMessage(err.Error()) {
+			return spaceAIDisabled
+		}
 		return spaceUnknown
 	}
 	defer cancel2()
@@ -331,7 +339,7 @@ func (c *Client) probeSpace(ctx context.Context, userID string, s SpaceInfo) spa
 			gotContent = true
 			bytes += len(ev.Text)
 		case EventError:
-			if strings.Contains(errText(ev), "aiNotEnabled") || strings.Contains(errText(ev), "AiNotEnabled") {
+			if isAINotEnabledMessage(errText(ev)) {
 				sawAINotEnabled = true
 			}
 		}

@@ -79,14 +79,14 @@ make build
 # 2025.. INFO notiongate listening addr=127.0.0.1:8787 accounts=1 rotate_at=0.8
 ```
 
-### 4. Использовать из ADE / клиента
+### Использовать из ADE / клиента
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="any")  # без API_KEY на localhost
 r = client.chat.completions.create(
-    model="claude-sonnet-4.6",          # имя можно приблизительное — резолвится по моделям пула
+    model="sonnet-5",          # точное имя из GET /v1/models (алиасы вида claude-sonnet-5 тоже резолвятся)
     messages=[{"role": "user", "content": "Привет!"}],
     stream=True,
 )
@@ -99,8 +99,30 @@ Anthropic-совместимо:
 ```bash
 curl http://127.0.0.1:8787/v1/messages \
   -H "content-type: application/json" \
-  -d '{"model":"sonnet-4.6","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hi"}]}'
+  -d '{"model":"sonnet-5","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hi"}]}'
 ```
+
+### Модели
+
+Актуальный список всегда отдаёт `GET /v1/models` (живой каталог из Notion, обновляется сам).
+Коротко (проверено живым опросом Notion):
+
+- **Claude** — `sonnet-5`, `opus-5`, `sonnet-4.6`, `opus-4.6`, `opus-4.7`, `opus-4.8`, `haiku-4.5`
+- **GPT** — `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.2`
+- **Gemini** — `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3-flash`, `gemini-3.1-pro`
+- **Grok** — `grok-4.6`, `grok-4.5`, `grok-4.3`, `grok-build-0.1`
+- **Open models** — `kimi-k3`, `kimi-k2.6`, `kimi-k2.7-code`, `deepseek-v4-pro`, `deepseek-v4-flash`, `glm-5.2`
+
+Алиасы вида `claude-opus-5`, `claude-sonnet-5` тоже резолвятся. Неизвестное имя — честный
+`400 model_not_found`, а не молчаливый дефолт. Дефолт при пустом `model` — `sonnet-5`.
+
+### Агенты и правка файлов (tool calling)
+
+ notiongate — только транспорт: модель возвращает `tool_calls`, а исполняет их **агент
+ на твоём компе** (OpenCode / Claude Code / ADE правит файлы, запускает команды).
+ Сервер сам ничего не запускает — поэтому для правки файлов направь своего агента
+ на `http://127.0.0.1:8787/v1` как на OpenAI-совместимый бэкенд и работай как обычно:
+ `tool_calls` туда-обратно возятся честно, включая stream-режим.
 
 ## Меню и маскот
 
@@ -250,10 +272,11 @@ extensions/            алиас для plugins (тоже сканируетс�
 scripts/               extract_notion_info.js для DevTools Console
 ```
 
-## Ограничения v1
+## Ограничения
 
-- Только текст: картинки/PDF-вложения и tool calling не транслируются
-- Токены usage оцениваются эвристически (~4 символа/токен) — Notion их не отдаёт
+- Вложения (картинки/PDF по URL и data:) поддерживаются; usage-токены Notion отдаёт не всегда —
+  тогда оценка эвристическая (~4 символа/токен)
+- Tool calling — passthrough через `tool_calls` (см. раздел про агентов выше)
 - Приватный API Notion может измениться: вся интеграция изолирована в `internal/notion`
 - `token_v2` равен полному доступу к аккаунту — храните `data/` и `.env` в секрете
 

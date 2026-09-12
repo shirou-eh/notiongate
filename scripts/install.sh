@@ -65,23 +65,38 @@ mkdir -p "$INSTALL_DIR"
 
 info "OS: $OS/$ARCH  version: $VERSION  dir: $INSTALL_DIR"
 
-# резолв latest → тег
+# резолв latest → тег (API надёжнее редиректа; редирект — fallback)
 if [[ "$VERSION" == "latest" ]]; then
   if command -v curl >/dev/null 2>&1; then
+    TAG_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)
+    if [[ -n "$TAG_JSON" ]]; then VERSION="$TAG_JSON"; info "latest -> $VERSION"; fi
+  fi
+  if [[ "$VERSION" == "latest" ]] && command -v curl >/dev/null 2>&1; then
     RESOLVED=$(curl -fsSL -o /dev/null -w "%{redirect_url}" "https://github.com/${REPO}/releases/latest" 2>/dev/null | sed 's#.*/tag/##' || true)
     if [[ -n "$RESOLVED" ]]; then VERSION="$RESOLVED"; info "latest -> $VERSION"; fi
   fi
 fi
-VERSION="${VERSION#v}"
+# нормализуем тег: latest остаётся latest, остальное — с префиксом v
+TAG="$VERSION"
+if [[ "$TAG" != "latest" ]]; then TAG="v${TAG#v}"; fi
 ASSET="${BINARY}-${OS}-${ARCH}"
 if [[ "$OS" == "linux" ]]; then ASSET="${ASSET}" ; fi
 if [[ "$OS" == "darwin" ]]; then ASSET="${ASSET}" ; fi
-# пробуем несколько шаблонов имён релиза
-URLS=(
-  "https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET}"
-  "https://github.com/${REPO}/releases/download/v${VERSION}/${BINARY}_${OS}_${ARCH}"
-  "https://github.com/${REPO}/releases/download/v${VERSION}/${BINARY}"
-)
+# пробуем несколько шаблонов имён релиза; при нерезолвнутом latest —
+# фиксированный путь GitHub без тега
+if [[ "$TAG" == "latest" ]]; then
+  URLS=(
+    "https://github.com/${REPO}/releases/latest/download/${ASSET}"
+    "https://github.com/${REPO}/releases/latest/download/${BINARY}_${OS}_${ARCH}"
+    "https://github.com/${REPO}/releases/latest/download/${BINARY}"
+  )
+else
+  URLS=(
+    "https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
+    "https://github.com/${REPO}/releases/download/${TAG}/${BINARY}_${OS}_${ARCH}"
+    "https://github.com/${REPO}/releases/download/${TAG}/${BINARY}"
+  )
+fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -103,7 +118,10 @@ if [[ -z "$downloaded" ]]; then
   if ! command -v go >/dev/null 2>&1; then
     err "не найден ни релиз ни go. Установи go или укажи --version"
   fi
-  GOBIN="$TMP_DIR" go install "notiongate/cmd/notiongate@v${VERSION}" 2>/dev/null || \
+  # полный module path; latest без v-префикса (@latest, а не @vlatest)
+  GOVERSION="$TAG"
+  if [[ "$GOVERSION" == "latest" ]]; then GOVERSION="latest"; fi
+  GOBIN="$TMP_DIR" go install "github.com/${REPO}/cmd/notiongate@${GOVERSION}" 2>/dev/null || \
   GOBIN="$TMP_DIR" go install "./cmd/notiongate" 2>/dev/null || \
     err "go install провалился"
   # go install кладёт в $TMP_DIR/notiongate

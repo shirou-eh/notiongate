@@ -45,26 +45,53 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Info "OS: $Os/$Arch  version: $Version  dir: $InstallDir"
 
 # resolve latest
-if ($Version -eq "latest") {
+$isLatest = ($Version -eq "latest")
+if ($isLatest) {
+  # 1) GitHub API — самый надёжный способ (работает и в 5.1, и в 7.x)
   try {
-    $r = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" -MaximumRedirection 0 -ErrorAction SilentlyContinue
-  } catch {
-    $loc = $_.Exception.Response.Headers.Location
-    if ($loc) {
-      $tag = ($loc -split "/")[-1]
-      if ($tag) { $Version = $tag; Info "latest -> $Version" }
+    $api = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -TimeoutSec 15 -ErrorAction Stop
+    if ($api.tag_name) { $Version = $api.tag_name; Info "latest -> $Version" }
+  } catch {}
+  # 2) fallback: редирект https://github.com/<repo>/releases/latest → /tag/vX.Y.Z
+  if ($Version -eq "latest") {
+    try {
+      $r = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" -MaximumRedirection 0 -ErrorAction SilentlyContinue
+      # PS7 с MaximumRedirection=0 не бросает, а возвращает 302 — смотрим сами
+      $loc = $null
+      if ($r -and $r.StatusCode -ge 300 -and $r.StatusCode -lt 400) { $loc = $r.Headers.Location }
+      if ($loc) {
+        $tag = ($loc -split "/")[-1]
+        if ($tag) { $Version = $tag; Info "latest -> $Version" }
+      }
+    } catch {
+      $loc = $_.Exception.Response.Headers.Location
+      if ($loc) {
+        $tag = ($loc -split "/")[-1]
+        if ($tag) { $Version = $tag; Info "latest -> $Version" }
+      }
     }
   }
 }
-$Version = $Version.TrimStart("v")
+$Tag = $Version
+if ($Tag -ne "latest" -and -not $Tag.StartsWith("v")) { $Tag = "v$Tag" }
 $Asset = "notiongate-$Os-$Arch.exe"
 if ($Arch -eq "amd64") { $Asset = "notiongate-windows-amd64.exe" }
 
-$Urls = @(
-  "https://github.com/$Repo/releases/download/v$Version/$Asset",
-  "https://github.com/$Repo/releases/download/v$Version/notiongate.exe",
-  "https://github.com/$Repo/releases/download/v$Version/notiongate-$Os-$Arch"
-)
+if ($Tag -eq "latest") {
+  # версию резолвнуть не удалось (нет релизов или нет сети) — GitHub умеет
+  # отдавать последний релиз по фиксированному пути без тега
+  $Urls = @(
+    "https://github.com/$Repo/releases/latest/download/$Asset",
+    "https://github.com/$Repo/releases/latest/download/notiongate.exe",
+    "https://github.com/$Repo/releases/latest/download/notiongate-$Os-$Arch"
+  )
+} else {
+  $Urls = @(
+    "https://github.com/$Repo/releases/download/$Tag/$Asset",
+    "https://github.com/$Repo/releases/download/$Tag/notiongate.exe",
+    "https://github.com/$Repo/releases/download/$Tag/notiongate-$Os-$Arch"
+  )
+}
 
 $Tmp = Join-Path $env:TEMP "notiongate-install-$([Guid]::NewGuid().ToString().Substring(0,8))"
 New-Item -ItemType Directory -Path $Tmp | Out-Null
@@ -83,7 +110,10 @@ if (-not $Downloaded) {
   Warn "бинарник не найден в релизах, пробую go install..."
   if (-not (Get-Command go -ErrorAction SilentlyContinue)) { Err "не найден ни релиз ни go. Установи go или укажи -Version" }
   $env:GOBIN = $Tmp
-  & go install "notiongate/cmd/notiongate@v$Version" 2>$null
+  # полный module path + корректный суффикс версии (@latest, а не @vlatest)
+  $GoVer = "latest"
+  if ($Tag -ne "latest") { $GoVer = $Tag }
+  & go install "github.com/$Repo/cmd/notiongate@$GoVer" 2>$null
   if (-not (Test-Path $BinTmp)) { & go install "./cmd/notiongate" 2>$null }
   if (-not (Test-Path $BinTmp)) { Err "go install провалился" }
   $Downloaded = "go install"

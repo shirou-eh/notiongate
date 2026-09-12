@@ -61,10 +61,25 @@ type Call struct {
 
 // Extract пытается вытащить tool_calls из текста модели.
 // Ищет ```json блок или голый JSON.
+// Валидация имён — по реестру сервера (legacy). Для клиентских тулзов
+// (агенты: OpenCode/Claude Code присылают свои Edit/Bash/Read/...) используй
+// ExtractAllowed — иначе чужие тулзы будут молча отброшены и агент решит,
+// что модель "не умеет в тулзы".
 var reJSONBlock = regexp.MustCompile("(?s)```json\\s*(\\{.*?\\})\\s*```")
 var reToolCalls = regexp.MustCompile(`"tool_calls"\s*:\s*\[`)
 
 func (b *Bridge) Extract(text string) ([]Call, string, bool) {
+	return b.ExtractAllowed(text, nil)
+}
+
+// ExtractAllowed — то же, но разрешённые имена берутся из запроса клиента.
+// allowed == nil → проверка по реестру (старое поведение).
+// allowed != nil (даже пустой) → разрешено всё из allowed + всё из реестра,
+// а если allowed непустой и имя есть в allowed — принимаем даже если его нет
+// в реестре. Это и есть passthrough клиентских тулзов: прокси не исполняет
+// их сам (файлы правит агент на компе пользователя), а только честно
+// передаёт tool_calls туда-обратно.
+func (b *Bridge) ExtractAllowed(text string, allowed []string) ([]Call, string, bool) {
 	if len(text) > 128*1024 {
 		text = text[:128*1024]
 	}
@@ -92,22 +107,63 @@ func (b *Bridge) Extract(text string) ([]Call, string, bool) {
 			ID       string `json:"id"`
 			Type     string `json:"type"`
 			Function struct {
-				Name      string `json:"name"`
-				Arguments string `json:"arguments"`
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
 			} `json:"function"`
 		} `json:"tool_calls"`
 	}
 	if err := json.Unmarshal([]byte(candidate), &wrapper); err != nil || len(wrapper.ToolCalls) == 0 {
 		return nil, text, false
 	}
+	// валидируем имена: реестр + явно разрешённые клиентом.
+	// allowed==nil → только реестр (legacy); иначе — объединение.
+	allowSet := map[string]bool{}
+	useAllowList := allowed != nil
+	for _, n := range allowed {
+		allowSet[n] = true
+	}
 	// валидируем имена
 	var out []Call
-	for _, c := range wrapper.ToolCalls {
-		if _, ok := b.reg.Get(c.Function.Name); !ok {
+	for i, c := range wrapper.ToolCalls {
+		name := c.Function.Name
+		if name == "" {
+			continue
+		}
+		_, inReg := b.reg.Get(name)
+		if !inReg && !(useAllowList && allowSet[name]) {
 			// неизвестный тул — пропускаем, но не фолбэчим
 			continue
 		}
-		out = append(out, Call{ID: c.ID, Name: c.Function.Name, Arguments: c.Function.Arguments})
+		args := string(c.Function.Arguments)
+		// arguments может прийти объектом {...} — нормализуем к строке.
+		// Пустой/null → "{}".
+		trimmed := strings.TrimSpace(args)
+		if trimmed == "" || trimmed == "null" {
+			args = "{}"
+		} else if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			// уже JSON — компактим, если бьётся, оставляем как есть
+			var v any
+			if json.Unmarshal([]byte(trimmed), &v) == nil {
+				if b2, err := json.Marshal(v); err == nil {
+					args = string(b2)
+				} else {
+					args = trimmed
+				}
+			} else {
+				args = trimmed
+			}
+		} else {
+			// голая строка без кавычек — заворачиваем в JSON-строку
+			if b2, err := json.Marshal(trimmed); err == nil {
+				_ = b2
+				args = trimmed
+			}
+		}
+		id := c.ID
+		if id == "" {
+			id = fmt.Sprintf("call_%d", i+1)
+		}
+		out = append(out, Call{ID: id, Name: name, Arguments: args})
 	}
 	if len(out) == 0 {
 		return nil, text, false

@@ -53,6 +53,34 @@ func EnabledCodenames(in []AvailableModel) []string {
 	return out
 }
 
+// FriendlyModelList маппит живой ответ getAvailableModels в client-facing
+// имена: только enabled; известным codename — friendly slug, новым
+// (которых ещё нет в KnownModels) — сам codename как есть, чтобы новая
+// модель была доступна сразу без обновления прокси. Codename тоже хранится
+// как алиас чтобы запрос по codename резолвился.
+func FriendlyModelList(avail []AvailableModel) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range avail {
+		if m.Codename == "" || m.Disabled {
+			continue
+		}
+		name := FriendlyForCodename(m.Codename)
+		if name == "" {
+			name = m.Codename
+		}
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+		if m.Codename != name && !seen[m.Codename] {
+			seen[m.Codename] = true
+			out = append(out, m.Codename)
+		}
+	}
+	return out
+}
+
 // GetAvailableModels запрашивает у Notion список моделей для space.
 // spaceID обязателен — без него Notion отвечает пусто/ошибкой.
 func (c *Client) GetAvailableModels(ctx context.Context, spaceID string) ([]AvailableModel, error) {

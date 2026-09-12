@@ -39,7 +39,17 @@ func TestParseAvailableModelsRealShape(t *testing.T) {
 		t.Fatalf("friendly = %q", FriendlyForCodename("oatmeal-cookie"))
 	}
 	// Новый неизвестный codename — как есть (доступен сразу).
-	if FriendlyForCodename("fireworks-minimax-m2.5") != "fireworks-minimax-m2.5" {
+	if FriendlyForCodename("fireworks-future-model-9.9") != "fireworks-future-model-9.9" {
 		t.Fatalf("unknown codename must passthrough")
+	}
+	// Новые модели из живого каталога 2026-09-12 резолвятся.
+	if FriendlyForCodename("fireworks-kimi-k3") != "kimi-k3" {
+		t.Fatalf("kimi-k3 friendly = %q", FriendlyForCodename("fireworks-kimi-k3"))
+	}
+	if FriendlyForCodename("angel-cake-high") != "sonnet-5" {
+		t.Fatalf("sonnet-5 friendly = %q", FriendlyForCodename("angel-cake-high"))
+	}
+	if FriendlyForCodename("grapefruit-zeppole") != "gemini-3.7-flash" {
+		t.Fatalf("gemini-3.7-flash friendly = %q", FriendlyForCodename("grapefruit-zeppole"))
 	}
 }

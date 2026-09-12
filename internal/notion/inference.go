@@ -42,11 +42,42 @@ const (
 // ErrAINotEnabled marks spaces where Notion AI is not enabled.
 var ErrAINotEnabled = errors.New("notion: AI not enabled on this space")
 
+// ErrModelDisabled marks a model restricted by plan (e.g. Fable 5 on
+// non-Business/Enterprise). В отличие от ai_not_enabled это ограничение
+// модели, а не space: аккаунт НЕ отправляем в cooldown.
+var ErrModelDisabled = errors.New("notion: model disabled for this plan")
+
+// isAINotEnabledMessage detects all known spellings of the upstream
+// "AI not enabled" signal (case-insensitive): aiNotEnabled,
+// AiNotEnabledOnSpace..., ai_not_enabled, ai-not-enabled, "ai not enabled".
+func isAINotEnabledMessage(msg string) bool {
+	lower := strings.ToLower(msg)
+	compact := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, lower)
+	return strings.Contains(compact, "ainotenabled")
+}
+
+// isModelDisabledMessage detects plan-restricted model signals.
+func isModelDisabledMessage(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "premium-feature-unavailable") ||
+		strings.Contains(lower, "premium feature unavailable") ||
+		strings.Contains(lower, "business_or_enterprise_plan_required") ||
+		strings.Contains(lower, "business or enterprise")
+}
+
 // inferenceErrFromMessage maps well-known upstream error strings onto
 // classified sentinels.
 func inferenceErrFromMessage(msg string) error {
-	if strings.Contains(msg, "aiNotEnabled") || strings.Contains(msg, "AiNotEnabled") {
+	if isAINotEnabledMessage(msg) {
 		return &InferenceError{Err: fmt.Errorf("%w: %s", ErrAINotEnabled, msg)}
+	}
+	if isModelDisabledMessage(msg) {
+		return &InferenceError{Err: fmt.Errorf("%w: %s", ErrModelDisabled, msg)}
 	}
 	return &InferenceError{Err: fmt.Errorf("upstream: %s", msg)}
 }
@@ -106,10 +137,22 @@ func (c *Client) RunInferenceStream(ctx context.Context, req *InferenceRequest) 
 	transcript = append(transcript,
 		ConfigBlock(req.Model),
 		ContextBlock(req.UserID, req.Email, req.UserName, sid, req.SpaceName, req.SpaceViewID),
+		UserSpecifiedContextBlock(),
 	)
 	transcript = append(transcript, turns...)
 	// Process file attachments: download and upload to Notion so they become real file blocks
 	transcript = c.processFileBlocks(ctx, transcript)
+	// userId на user-блоках — так шлёт настоящий веб-клиент (видно в HAR:
+	// {"type":"user","value":[[...]],"userId":"...","createdAt":"..."}).
+	// Без него мультишаговые треды теряют авторство.
+	uid := pickStr(req.UserID, c.userID)
+	if uid != "" {
+		for i := range transcript {
+			if transcript[i].Type == "user" && transcript[i].UserID == "" {
+				transcript[i].UserID = uid
+			}
+		}
+	}
 
 	payload := map[string]any{
 		"traceId":                       traceID,
@@ -123,6 +166,7 @@ func (c *Client) RunInferenceStream(ctx context.Context, req *InferenceRequest) 
 		"setUnreadState":                true,
 		"threadType":                    "workflow",
 		"asPatchResponse":               true,
+		"patchResponseVersion":          2,
 		"hasHeartbeat":                  false,
 		"createdSource":                 "ai_module",
 		"isUserInAnySalesAssistedSpace": false,
@@ -160,10 +204,12 @@ func (c *Client) RunInferenceStream(ctx context.Context, req *InferenceRequest) 
 		return nil, nil, err
 	}
 	if resp.StatusCode >= 400 {
-		drain(resp.Body)
+		// Читаем тело чтобы отличить aiNotEnabled (скип) от auth (invalid):
+		// Notion отдаёт 403 и с тем, и с другим.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
 		stop()
-		return nil, nil, classify(resp)
+		return nil, nil, classifyWithBody(resp, errBody)
 	}
 
 	events := make(chan Event, 128)
@@ -278,8 +324,8 @@ func (c *Client) processFileBlocks(ctx context.Context, transcript []TranscriptE
 		if err != nil {
 			// Fallback: keep as text placeholder
 			out = append(out, TranscriptEntry{
-				ID:   e.ID,
-				Type: "user",
+				ID:    e.ID,
+				Type:  "user",
 				Value: [][]string{{"[file: " + filename + " (" + ctype + ")]"}},
 			})
 			continue
@@ -432,7 +478,11 @@ func (p *streamParser) processLine(ctx context.Context, line string, out chan<- 
 		msg := eventMessage(top)
 		return true, send(ctx, out, Event{Kind: EventError, Err: inferenceErrFromMessage(msg)})
 	case "premium-feature-unavailable":
-		return true, send(ctx, out, Event{Kind: EventError, Err: &InferenceError{Err: fmt.Errorf("upstream: premium feature unavailable (model/capability not on plan)")}})
+		msg := eventMessage(top)
+		if msg == "" || msg == "unknown notion error" {
+			msg = "premium-feature-unavailable"
+		}
+		return true, send(ctx, out, Event{Kind: EventError, Err: inferenceErrFromMessage(msg)})
 	case "patch-start":
 		p.handlePatchStart(top)
 		return false, nil
@@ -820,6 +870,8 @@ func ContextBlock(userID, email, userName, spaceID, spaceName, spaceViewID strin
 }
 
 // UserBlock builds a user message entry.
+// userId штампуется позже центрально в RunInferenceStream (из аккаунта),
+// руками его ставить не нужно.
 func UserBlock(text string) TranscriptEntry {
 	return TranscriptEntry{
 		ID:        model.NewID(),
@@ -827,6 +879,19 @@ func UserBlock(text string) TranscriptEntry {
 		Value:     [][]string{{text}},
 		CreatedAt: transcriptClock(),
 	}
+}
+
+// UserSpecifiedContextBlock builds the empty user-specified-context entry.
+//
+// Настоящий веб-клиент всегда шлёт этот блок между context и первым
+// сообщением (подтверждено HAR-капчей notion-forge):
+// {"type":"user-specified-context","value":{"pointers":[...]}}.
+// Сюда Notion кладёт указатели на упомянутые @-страницы; без блока та же
+// семантика — пустой список.
+func UserSpecifiedContextBlock() TranscriptEntry {
+	return TranscriptEntry{ID: model.NewID(), Type: "user-specified-context", Value: map[string]any{
+		"pointers": []any{},
+	}}
 }
 
 // AssistantBlock builds an assistant (agent-inference) message entry.

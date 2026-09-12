@@ -196,13 +196,15 @@ func TestResolveModel(t *testing.T) {
 	_ = p.Add(acc)
 	// Точное совпадение (normalized): friendly → codename, codename → codename.
 	cases := map[string]string{
-		"sonnet-4.6":         "almond-croissant-low",
-		"Sonnet-4.6":         "almond-croissant-low",
-		"opus-4.8":           "ambrosia-tart-high",
-		"oatmeal-cookie":     "oatmeal-cookie",
-		"gpt-5.2":            "oatmeal-cookie", // из verified таблицы
-		"totally-unknown":    "totally-unknown",
-		"":                   "almond-croissant-low",
+		"sonnet-4.6":      "almond-croissant-low",
+		"Sonnet-4.6":      "almond-croissant-low",
+		"opus-4.8":        "ambrosia-tart-high",
+		"oatmeal-cookie":  "oatmeal-cookie",
+		"gpt-5.2":         "oatmeal-cookie", // из verified таблицы
+		"sonnet-5":        "angel-cake-high",
+		"gpt-5.6-luna":    "olive-jellyroll",
+		"totally-unknown": "totally-unknown",
+		"":                "angel-cake-high",
 	}
 	for in, want := range cases {
 		if got := p.ResolveModel(in); got != want {

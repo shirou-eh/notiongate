@@ -839,29 +839,9 @@ func (p *Pool) refreshModelsBestEffort(ctx context.Context, id string) {
 	if err != nil || len(avail) == 0 {
 		return
 	}
-	friendly := make([]string, 0, len(avail)*2)
-	seen := map[string]bool{}
-	for _, m := range avail {
-		if m.Codename == "" || m.Disabled {
-			continue
-		}
-		name := notion.FriendlyForCodename(m.Codename)
-		if name == "" {
-			name = m.Codename
-		}
-		if !seen[name] {
-			seen[name] = true
-			friendly = append(friendly, name)
-		}
-		if m.Codename != name && !seen[m.Codename] {
-			seen[m.Codename] = true
-			friendly = append(friendly, m.Codename)
-		}
+	if friendly := notion.FriendlyModelList(avail); len(friendly) > 0 {
+		_ = p.Update(id, func(a *model.Account) { a.Models = friendly })
 	}
-	if len(friendly) == 0 {
-		return
-	}
-	_ = p.Update(id, func(a *model.Account) { a.Models = friendly })
 }
 
 // BootstrapToken runs discovery for a raw token_v2 (used by CLI and admin add).
@@ -874,6 +854,10 @@ func (p *Pool) BootstrapToken(ctx context.Context, acc model.Account) (*notion.B
 }
 
 // TestAccount pings a stored account and updates its status accordingly.
+//
+// ВАЖНО: Ping (getSpaces) НЕ детектит ai_not_enabled — сессия может быть
+// валидна, а AI на space выключен. Для проверки AI используйте ProbeAI ниже
+// (CLI `accounts test` и admin test вызывают оба).
 func (p *Pool) TestAccount(ctx context.Context, id string) error {
 	cli, err := p.Client(id)
 	if err != nil {
@@ -895,4 +879,117 @@ func (p *Pool) TestAccount(ctx context.Context, id string) error {
 		p.MarkError(id, "manual test: "+err.Error())
 	}
 	return err
+}
+
+// AIProbeResult — итог ручной проверки AI-способности аккаунта.
+type AIProbeResult struct {
+	SessionOK bool     `json:"session_ok"`
+	AIOK      bool     `json:"ai_ok"`
+	Models    []string `json:"models,omitempty"`
+	Error     string   `json:"error,omitempty"`
+}
+
+// ProbeAI проверяет реальную AI-способность: getAvailableModels + крошечный
+// inference. ai_not_enabled → 30m cooldown (скип) + AIOK=false. Квота не
+// тратится (RecordUsage здесь не вызывается — это проба, не запрос).
+func (p *Pool) ProbeAI(ctx context.Context, id string) AIProbeResult {
+	res := AIProbeResult{}
+	acc, err := p.Get(id)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	cli, err := p.Client(id)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	if err := cli.Ping(ctx); err != nil {
+		if errors.Is(err, notion.ErrAuth) {
+			p.MarkAuthFailed(id, "ai probe: "+err.Error())
+		} else {
+			p.MarkError(id, "ai probe ping: "+err.Error())
+		}
+		res.Error = err.Error()
+		return res
+	}
+	res.SessionOK = true
+	if acc.SpaceID == "" {
+		res.Error = "no space_id (re-add account without --force)"
+		return res
+	}
+	// Каталог моделей (best-effort, обновляет Models).
+	if avail, err := cli.GetAvailableModels(ctx, acc.SpaceID); err == nil {
+		if friendly := notion.FriendlyModelList(avail); len(friendly) > 0 {
+			res.Models = friendly
+			_ = p.Update(id, func(a *model.Account) { a.Models = friendly })
+		}
+		if errors.Is(err, notion.ErrAINotEnabled) {
+			p.MarkRateLimited(id, 30*time.Minute, "ai probe: AI not enabled (code: ai_not_enabled)")
+			res.Error = "Notion AI is not enabled for this account/space (code: ai_not_enabled)"
+			return res
+		}
+	} else if errors.Is(err, notion.ErrAINotEnabled) {
+		p.MarkRateLimited(id, 30*time.Minute, "ai probe: AI not enabled (code: ai_not_enabled)")
+		res.Error = "Notion AI is not enabled for this account/space (code: ai_not_enabled)"
+		return res
+	}
+	// Крошечный inference.
+	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	events, stop, err := cli.RunInferenceStream(pctx, &notion.InferenceRequest{
+		SpaceID:     acc.SpaceID,
+		UserID:      acc.UserID,
+		Email:       acc.Email,
+		SpaceName:   acc.SpaceName,
+		SpaceViewID: acc.SpaceViewID,
+		Transcript:  []notion.TranscriptEntry{notion.UserBlock("Reply with exactly: ok")},
+		IsProbe:     true,
+	})
+	if err != nil {
+		if errors.Is(err, notion.ErrAINotEnabled) {
+			p.MarkRateLimited(id, 30*time.Minute, "ai probe: AI not enabled (code: ai_not_enabled)")
+			res.Error = "Notion AI is not enabled for this account/space (code: ai_not_enabled)"
+			return res
+		}
+		p.MarkError(id, "ai probe inference: "+err.Error())
+		res.Error = err.Error()
+		return res
+	}
+	defer stop()
+	for ev := range events {
+		switch ev.Kind {
+		case notion.EventText:
+			if ev.Text != "" {
+				res.AIOK = true
+				p.MarkStreamOK(id)
+				_ = p.Update(id, func(a *model.Account) {
+					a.LastCheck = time.Now()
+					a.LastError = ""
+				})
+				return res
+			}
+		case notion.EventError:
+			if errors.Is(ev.Err, notion.ErrAINotEnabled) {
+				p.MarkRateLimited(id, 30*time.Minute, "ai probe: AI not enabled (code: ai_not_enabled)")
+				res.Error = "Notion AI is not enabled for this account/space (code: ai_not_enabled)"
+				return res
+			}
+			if errors.Is(ev.Err, notion.ErrModelDisabled) {
+				res.Error = "model disabled for plan: " + ev.Err.Error()
+				return res
+			}
+			res.Error = ev.Err.Error()
+			return res
+		case notion.EventDone:
+			if !res.AIOK {
+				res.Error = "empty stream (throttled or AI disabled)"
+				return res
+			}
+		}
+	}
+	if !res.AIOK && res.Error == "" {
+		res.Error = "empty stream (throttled or AI disabled)"
+	}
+	return res
 }

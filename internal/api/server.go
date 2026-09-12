@@ -207,6 +207,8 @@ func errCode(err error) string {
 		return ""
 	case errors.Is(err, pool.ErrUnknownModel):
 		return "model_not_found"
+	case errors.Is(err, notion.ErrModelDisabled):
+		return "model_disabled"
 	case errors.Is(err, notion.ErrAINotEnabled):
 		return "ai_not_enabled"
 	case errors.Is(err, notion.ErrAuth):
@@ -247,6 +249,11 @@ func (s *Server) markFailure(id string, err error) {
 	case errors.Is(err, notion.ErrAINotEnabled):
 		// Скипаем аккаунт: cooldown 30m вместо terminal invalid.
 		s.pool.MarkRateLimited(id, 30*time.Minute, "AI not enabled on this space (code: ai_not_enabled): skipped, failover to next account")
+	case errors.Is(err, notion.ErrModelDisabled):
+		// Ограничение модели планом — аккаунт здоров, cooldown НЕ ставим,
+		// только фиксируем причину. Failover всё равно пробует следующий
+		// аккаунт (вдруг там другой план), 403 — когда все перебраны.
+		s.pool.MarkError(id, "model disabled for plan: "+err.Error())
 	case errors.Is(err, notion.ErrAuth):
 		s.pool.MarkAuthFailed(id, err.Error())
 	case errors.Is(err, notion.ErrRateLimited):
@@ -278,14 +285,29 @@ func (s *Server) runInference(ctx context.Context, job *translate.ChatJob, forwa
 	if !ok {
 		return runResult{}, pool.ErrUnknownModel
 	}
-	transcript := translate.BuildTranscript(job)
-	inTok := translate.TranscriptInputTokens(transcript)
+	// Transcript собирается под КАЖДЫЙ аккаунт отдельно (внутри лупа):
+	// userId штампуется в user-блоки как у настоящего веб-клиента,
+	// а при фейловере аккаунт (и его userId) меняется.
 	started := time.Now()
 
 	tried := map[string]bool{}
 	var lastErr error
 
-	for attempt := 0; attempt < s.cfg.MaxAttempts; attempt++ {
+	// ai_not_enabled обязан перебрать ВСЕ живые аккаунты, а не только
+	// MaxAttempts (default 3): иначе при 13 аккаунтах запрос падает с 403
+	// хотя 4-й аккаунт рабочий. Cap 32 — защита от бесконечного цикла.
+	maxTries := s.cfg.MaxAttempts
+	if n := len(s.pool.Snapshot()); n > maxTries {
+		maxTries = n
+	}
+	if maxTries > 32 {
+		maxTries = 32
+	}
+	if maxTries < 1 {
+		maxTries = 1
+	}
+
+	for attempt := 0; attempt < maxTries; attempt++ {
 		if ctx.Err() != nil {
 			return runResult{}, ctx.Err()
 		}
@@ -312,6 +334,10 @@ func (s *Server) runInference(ctx context.Context, job *translate.ChatJob, forwa
 			lastErr = err
 			continue
 		}
+		// userId этого аккаунта — в transcript (как у веб-клиента) и в запрос.
+		job.UserID = acc.UserID
+		transcript := translate.BuildTranscript(job)
+		inTok := translate.TranscriptInputTokens(transcript)
 		req := &notion.InferenceRequest{
 			SpaceID:     acc.SpaceID,
 			UserID:      acc.UserID,

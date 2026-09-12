@@ -14,9 +14,11 @@ import (
 // ---- OpenAI request ----
 
 type openAIMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-	Name    string          `json:"name,omitempty"`
+	Role       string           `json:"role"`
+	Content    json.RawMessage  `json:"content"`
+	Name       string           `json:"name,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 type openAIRequest struct {
@@ -26,9 +28,9 @@ type openAIRequest struct {
 	StreamOptions *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options,omitempty"`
-	User       string          `json:"user"`
-	Tools      []openAITool    `json:"tools,omitempty"`
-	ToolChoice any             `json:"tool_choice,omitempty"`
+	User       string       `json:"user"`
+	Tools      []openAITool `json:"tools,omitempty"`
+	ToolChoice any          `json:"tool_choice,omitempty"`
 }
 
 type openAITool struct {
@@ -90,30 +92,60 @@ func ParseOpenAI(body []byte) (*ChatJob, error) {
 		case "system", "developer":
 			job.System = append(job.System, text)
 		case "assistant":
-			// Check if this is a tool call (assistant with tool_calls)
-			var aux struct {
-				ToolCalls []struct {
-					ID       string `json:"id"`
-					Function struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					} `json:"function"`
-				} `json:"tool_calls"`
-			}
-			if json.Unmarshal(m.Content, &aux) == nil && len(aux.ToolCalls) > 0 {
-				// Tool call — keep as assistant text for context, tools will be extracted
-				job.Turns = append(job.Turns, Turn{Role: "assistant", Text: text, Files: files})
+			// Assistant с tool_calls (агентный луп: OpenCode/Claude Code шлют
+			// content=null + tool_calls=[{id, function:{name, arguments}}]).
+			// Сохраняем вызовы текстом с ID чтобы transcript не терял связь
+			// "вызов → результат" на следующем шаге.
+			if len(m.ToolCalls) > 0 {
+				var b strings.Builder
+				if strings.TrimSpace(text) != "" {
+					b.WriteString(strings.TrimSpace(text))
+					b.WriteString("\n")
+				}
+				for _, tc := range m.ToolCalls {
+					args := strings.TrimSpace(tc.Function.Arguments)
+					if args == "" {
+						args = "{}"
+					}
+					fmt.Fprintf(&b, "[assistant tool_call id=%s name=%s args=%s]\n",
+						tc.ID, tc.Function.Name, args)
+				}
+				job.Turns = append(job.Turns, Turn{Role: "assistant", Text: strings.TrimSpace(b.String()), Files: files})
 			} else {
-				job.Turns = append(job.Turns, Turn{Role: "assistant", Text: text, Files: files})
+				// legacy: некоторые клиенты кладут tool_calls внутрь content
+				var aux struct {
+					ToolCalls []struct {
+						ID       string `json:"id"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				}
+				if json.Unmarshal(m.Content, &aux) == nil && len(aux.ToolCalls) > 0 {
+					// Tool call — keep as assistant text for context, tools will be extracted
+					job.Turns = append(job.Turns, Turn{Role: "assistant", Text: text, Files: files})
+				} else {
+					job.Turns = append(job.Turns, Turn{Role: "assistant", Text: text, Files: files})
+				}
 			}
 		case "tool", "function":
-			// Tool result — preserve tool name if available
+			// Tool result — сохраняем tool_call_id чтобы модель видела
+			// какой вызов отработал. Файлы правит агент на компе
+			// пользователя, прокси только честно возит результаты.
 			toolName := m.Name
-			if toolName != "" {
-				text = fmt.Sprintf("[tool %s result] %s", toolName, text)
-			} else {
-				text = "[tool output] " + text
+			prefix := "[tool output]"
+			if m.ToolCallID != "" && toolName != "" {
+				prefix = fmt.Sprintf("[tool %s result id=%s]", toolName, m.ToolCallID)
+			} else if m.ToolCallID != "" {
+				prefix = fmt.Sprintf("[tool result id=%s]", m.ToolCallID)
+			} else if toolName != "" {
+				prefix = fmt.Sprintf("[tool %s result]", toolName)
 			}
+			if strings.TrimSpace(text) == "" {
+				text = "{}"
+			}
+			text = prefix + " " + text
 			job.Turns = append(job.Turns, Turn{Role: "user", Text: text, Files: files})
 		default:
 			job.Turns = append(job.Turns, Turn{Role: "user", Text: text, Files: files})
@@ -189,8 +221,8 @@ type openAIMessageOut struct {
 }
 
 type openAIToolCall struct {
-	ID       string               `json:"id"`
-	Type     string               `json:"type"`
+	ID       string             `json:"id"`
+	Type     string             `json:"type"`
 	Function openAIToolCallFunc `json:"function"`
 }
 
@@ -272,6 +304,31 @@ func BuildOpenAIChunk(id, mdl string, first bool, contentDelta, reasoningDelta s
 		Created: time.Now().Unix(),
 		Model:   mdl,
 		Choices: []openAIChoice{{Index: 0, Delta: delta, FinishReason: finish}},
+	}
+	b, _ := json.Marshal(resp)
+	return b
+}
+
+// BuildOpenAIToolChunk renders one streaming tool_calls delta.
+// firstCall=true включает id+name (первый чанк по каждому tool index),
+// чтобы агенты (OpenCode/Claude Code) собрали вызов целиком.
+// Аргументы шлём целиком — клиенты умеют склеивать delta.function.arguments.
+func BuildOpenAIToolChunk(id, mdl string, index int, callID, name, args string, firstCall bool) []byte {
+	fn := map[string]any{"arguments": args}
+	if firstCall {
+		fn["name"] = name
+	}
+	tc := map[string]any{"index": index, "type": "function", "function": fn}
+	if firstCall && callID != "" {
+		tc["id"] = callID
+	}
+	delta := map[string]any{"role": "assistant", "tool_calls": []any{tc}}
+	// У первого вызова role уже был в начальном чанке — дублировать ок,
+	// клиенты игнорируют повторный role.
+	resp := map[string]any{
+		"id": id, "object": "chat.completion.chunk", "created": time.Now().Unix(),
+		"model":   mdl,
+		"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}},
 	}
 	b, _ := json.Marshal(resp)
 	return b

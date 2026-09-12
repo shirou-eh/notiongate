@@ -4,59 +4,81 @@ package notion
 //
 // Источник правды: POST /api/v3/getAvailableModels {spaceId} — живой ответ
 // Notion (см. internal/notion/available_models.go). Таблица ниже — проверенный
-// снимок этого ответа (19 enabled + 1 disabled Fable 5), нужен только как
-// fallback когда пул пуст или discovery не сработал.
+// снимок этого ответа (30 enabled + 3 disabled: Fable 5, Fable 5.1,
+// GPT-6 Astra), нужен только как fallback когда пул пуст или discovery
+// не сработал. Проверено 2026-09-12 живым опросом 13 аккаунтов
+// (все 13 отдали одинаковые 30+3).
 //
 // ВАЖНО: здесь нет выдуманных алиасов. Каждая запись — 1:1 к реальному
 // codename из Notion. Неизвестные имена НЕ мапятся на дефолт молча — API
 // отвечает 400 model_not_found (см. pool.LookupModel).
 var KnownModels = map[string]string{
 	// OpenAI
-	"gpt-5.2":      "oatmeal-cookie",
-	"gpt-5.4":      "oval-kumquat-medium",
-	"gpt-5.5":      "opal-quince-medium",
-	"gpt-5.4-mini": "oregon-grape-medium",
-	"gpt-5.4-nano": "otaheite-apple-medium",
+	"gpt-5.2":       "oatmeal-cookie",
+	"gpt-5.4":       "oval-kumquat-medium",
+	"gpt-5.5":       "opal-quince-medium",
+	"gpt-5.4-mini":  "oregon-grape-medium",
+	"gpt-5.4-nano":  "otaheite-apple-medium",
+	"gpt-5.6-luna":  "olive-jellyroll",
+	"gpt-5.6-terra": "orchid-muffin",
+	"gpt-5.6-sol":   "orange-mousse",
 	// Anthropic
 	"sonnet-4.6": "almond-croissant-low",
+	"sonnet-5":   "angel-cake-high",
 	"opus-4.6":   "avocado-froyo-medium",
 	"opus-4.7":   "apricot-sorbet-high",
 	"opus-4.8":   "ambrosia-tart-high",
+	"opus-5":     "agave-flan",
 	"haiku-4.5":  "anthropic-haiku-4.5",
 	// Gemini
-	"gemini-2.5-flash": "vertex-gemini-2.5-flash",
 	"gemini-3.5-flash": "vertex-gemini-3.5-flash",
+	"gemini-3.6-flash": "vertex-gemini-3.6-flash",
+	"gemini-3.7-flash": "grapefruit-zeppole",
 	"gemini-3.1-pro":   "galette-medium-thinking",
 	"gemini-3-flash":   "gingerbread",
 	// Mystery / third-party
-	"kimi-k2.6":       "fireworks-kimi-k2.6",
-	"deepseek-v4-pro": "baseten-deepseek-v4-pro",
-	"glm-5.2":         "baseten-glm-5.2",
-	"grok-4.3":        "xigua-mochi-medium",
-	"grok-build-0.1":  "xinomavro-cake",
-	// Disabled на большинстве планов (business/enterprise only) — маппинг
-	// оставлен чтобы запрос возвращал честную upstream-ошибку, а не 400.
-	// В /v1/models disabled НЕ показывается.
-	"fable-5": "acai-budino-high",
+	"kimi-k2.6":         "fireworks-kimi-k2.6",
+	"kimi-k2.7-code":    "fireworks-kimi-k2.7",
+	"kimi-k2.7":         "fireworks-kimi-k2.7",
+	"kimi-k3":           "fireworks-kimi-k3",
+	"deepseek-v4-pro":   "baseten-deepseek-v4-pro",
+	"deepseek-v4-flash": "baseten-deepseek-v4-flash",
+	"glm-5.2":           "baseten-glm-5.2",
+	"grok-4.3":          "xigua-mochi-medium",
+	"grok-4.5":          "strawberry-whoopiepie",
+	"grok-4.6":          "soursop-shortcake",
+	"grok-build-0.1":    "xinomavro-cake",
+	"grok-0.1":          "xinomavro-cake",
+	// Disabled на большинстве планов (business/enterprise only, либо
+	// trial_not_allowed) — маппинг оставлен чтобы запрос возвращал честную
+	// upstream-ошибку, а не 400. В /v1/models disabled НЕ показывается.
+	"fable-5":     "acai-budino-high",
+	"fable-5.1":   "assam-chai",
+	"gpt-6-astra": "orlando-quinn",
 
 	// Совместимые префиксы (те же codename, без выдумок):
 	"claude-sonnet-4.6": "almond-croissant-low",
+	"claude-sonnet-5":   "angel-cake-high",
 	"claude-opus-4.6":   "avocado-froyo-medium",
 	"claude-opus-4.7":   "apricot-sorbet-high",
 	"claude-opus-4.8":   "ambrosia-tart-high",
+	"claude-opus-5":     "agave-flan",
 	"claude-haiku-4.5":  "anthropic-haiku-4.5",
 }
 
 // DisabledModels — client-facing имена, которые Notion отдаёт с
-// isDisabled=true (план business/enterprise required). В /v1/models они
-// скрыты, но LookupModel их знает чтобы вернуть честную upstream-ошибку.
+// isDisabled=true (план business/enterprise required либо trial_not_allowed).
+// В /v1/models они скрыты, но LookupModel их знает чтобы вернуть честную
+// upstream-ошибку.
 var DisabledModels = map[string]bool{
-	"fable-5": true,
+	"fable-5":     true,
+	"fable-5.1":   true,
+	"gpt-6-astra": true,
 }
 
 // DefaultModel используется только когда клиент вообще не указал model
 // (пустая строка). Неизвестное имя — это 400, а не silent fallback.
-const DefaultModel = "almond-croissant-low"
+const DefaultModel = "angel-cake-high" // sonnet-5
 
 // codenameSet — все известные внутренние codename (значения KnownModels).
 func codenameSet() map[string]bool {

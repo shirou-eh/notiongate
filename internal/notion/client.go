@@ -180,6 +180,10 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body []byte) (
 }
 
 // classify maps an upstream HTTP status onto pool-relevant error classes.
+//
+// ВАЖНО: Notion может вернуть 400/403 с телом aiNotEnabled для space без AI.
+// Такое тело проверяется вызывающим кодом через classifyWithBody; голый
+// classify без тела используется только когда тела уже нет (drain).
 func classify(resp *http.Response) error {
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
@@ -236,6 +240,27 @@ func (c *Client) doInference(ctx context.Context, body []byte, spaceID string) (
 	return resp, nil
 }
 
+// classifyWithBody is classify + sniffing тела ошибки: 400/403 с
+// aiNotEnabled внутри — это ErrAINotEnabled (скип space), а не ErrAuth
+// (terminal invalid). Без этого space без AI убивал аккаунт навсегда.
+func classifyWithBody(resp *http.Response, body []byte) error {
+	if resp.StatusCode >= 400 && isAINotEnabledMessage(string(body)) {
+		return fmt.Errorf("%w: %s", ErrAINotEnabled, firstBytes(body, 300))
+	}
+	if resp.StatusCode >= 400 && isModelDisabledMessage(string(body)) {
+		return fmt.Errorf("%w: %s", ErrModelDisabled, firstBytes(body, 300))
+	}
+	return classify(resp)
+}
+
+func firstBytes(b []byte, n int) string {
+	s := string(b)
+	if len(s) > n {
+		return s[:n] + "…(truncated)"
+	}
+	return s
+}
+
 // postJSON performs a POST and decodes the JSON response.
 func (c *Client) postJSON(ctx context.Context, endpoint string, payload []byte) (json.RawMessage, error) {
 	resp, err := c.do(ctx, http.MethodPost, endpoint, payload)
@@ -247,7 +272,7 @@ func (c *Client) postJSON(ctx context.Context, endpoint string, payload []byte) 
 	if err != nil {
 		return nil, fmt.Errorf("notion: read %s: %w", endpoint, err)
 	}
-	if err := classify(resp); err != nil {
+	if err := classifyWithBody(resp, body); err != nil {
 		return nil, err
 	}
 	if len(body) == 0 {

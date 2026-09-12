@@ -56,3 +56,10 @@ func TestExtractAllowed_MissingID(t *testing.T) {
 		t.Fatalf("clean must cut block: %q", clean)
 	}
 }
+
+func TestPromptInjectionStatesToolsAreReal(t *testing.T) {
+	p := DefaultBridge.PromptInjection([]Tool{{Name: "Edit", Description: "edit"}}, "auto")
+	if !strings.Contains(p, "not role-play") || !strings.Contains(p, "harness executes") {
+		t.Fatalf("injection must address the pretend-output refusal: %q", p)
+	}
+}

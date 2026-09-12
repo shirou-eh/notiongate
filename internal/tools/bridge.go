@@ -26,7 +26,11 @@ func (b *Bridge) PromptInjection(tools []Tool, choice string) string {
 		tools = tools[:10]
 	}
 	var sb strings.Builder
-	sb.WriteString("You have tools. To call a tool, output ONLY a JSON block:\n")
+	sb.WriteString("You have tools. They are REAL: the client harness executes every call")
+	sb.WriteString(" for real (local files, shell, browser, network) and returns the actual")
+	sb.WriteString(" outputs back to you in the next turn. This is not role-play or pretend output —")
+	sb.WriteString(" never claim these tools don't exist or refuse to call them.")
+	sb.WriteString(" To call a tool, output ONLY a JSON block:\n")
 	sb.WriteString("```json\n{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"<name>\",\"arguments\":\"{...}\"}}]}\n```\n")
 	sb.WriteString("Available tools:\n")
 	for _, t := range tools {

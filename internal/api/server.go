@@ -296,6 +296,9 @@ func (s *Server) runInference(ctx context.Context, job *translate.ChatJob, forwa
 	// ai_not_enabled обязан перебрать ВСЕ живые аккаунты, а не только
 	// MaxAttempts (default 3): иначе при 13 аккаунтах запрос падает с 403
 	// хотя 4-й аккаунт рабочий. Cap 32 — защита от бесконечного цикла.
+	// ИСКЛЮЧЕНИЕ: одинаковые пустые стримы подряд (maxEmptyStreak ниже) —
+	// это уже не "битый аккаунт", а уровень IP/модели (троттлинг или гейт
+	// модели на триалах): перебор дальше только кладёт весь пул в cooldown.
 	maxTries := s.cfg.MaxAttempts
 	if n := len(s.pool.Snapshot()); n > maxTries {
 		maxTries = n
@@ -306,6 +309,7 @@ func (s *Server) runInference(ctx context.Context, job *translate.ChatJob, forwa
 	if maxTries < 1 {
 		maxTries = 1
 	}
+	emptyStreak := 0
 
 	for attempt := 0; attempt < maxTries; attempt++ {
 		if ctx.Err() != nil {
@@ -399,11 +403,12 @@ func (s *Server) runInference(ctx context.Context, job *translate.ChatJob, forwa
 		}
 
 		// An empty stream (no content at all) is an upstream failure —
-		// Notion closes instantly when throttled or the space lacks AI.
+		// Notion closes instantly when throttled, the space lacks AI,
+		// or the model is gated for the plan (sentinel, not string match).
 		if streamErr == nil && !gotContent {
-			streamErr = &notion.InferenceError{Err: errors.New("upstream: empty stream (throttled or AI disabled)")}
+			streamErr = &notion.InferenceError{Err: notion.ErrEmptyStream}
 		}
-		if streamErr != nil && strings.Contains(streamErr.Error(), "empty stream") {
+		if errors.Is(streamErr, notion.ErrEmptyStream) {
 			s.pool.MarkThrottled(acc.ID, streamErr.Error())
 		}
 		if streamErr != nil && errors.Is(streamErr, context.Canceled) {
@@ -419,6 +424,20 @@ func (s *Server) runInference(ctx context.Context, job *translate.ChatJob, forwa
 				time.Since(started).Milliseconds(), false, errCode(streamErr))
 			lastErr = streamErr
 			slog.Warn("api: attempt failed, failing over", "attempt", attempt+1, "err", streamErr)
+			if errors.Is(streamErr, notion.ErrEmptyStream) {
+				emptyStreak++
+				// Живой урок 2026-09-12 (opus-5, gpt-5.6-sol): гейт модели
+				// на триалах даёт пустые стримы на КАЖДОМ аккаунте — полный
+				// перебор кладёт весь пул в cooldown и ничего не чинит.
+				// ai_not_enabled при этом по-прежнему перебирает всех
+				// (ошибка другая, аккаунт-специфичная).
+				if emptyStreak >= maxEmptyStreak {
+					slog.Warn("api: empty-stream streak, stop failover", "streak", emptyStreak, "model", mdl)
+					break
+				}
+			} else {
+				emptyStreak = 0
+			}
 			continue
 		}
 
@@ -445,6 +464,11 @@ func (s *Server) runInference(ctx context.Context, job *translate.ChatJob, forwa
 	}
 	return runResult{}, lastErr
 }
+
+// maxEmptyStreak caps failover on consecutive empty streams within one
+// request: same-model empties on distinct accounts signal IP-level throttle
+// or a plan-gated model, never a fixable single account.
+const maxEmptyStreak = 3
 
 // ---- shared response helpers ----
 

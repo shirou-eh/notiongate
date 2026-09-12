@@ -523,3 +523,68 @@ func TestE2EToolsModelNoDupMidChain(t *testing.T) {
 		t.Fatalf("expected text answer: %s", body)
 	}
 }
+
+func TestE2EEmptyStreakCapsFailover(t *testing.T) {
+	// Все аккаунты отдают пустые стримы (гейт модели/троттлинг):
+	// перебор обязан остановиться на 3, а не положить весь пул.
+	var calls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/getSpaces", func(w http.ResponseWriter, r *http.Request) {
+		uid := "u-e"
+		w.Write([]byte(`{"` + uid + `":{"notion_user":{"` + uid + `":{"value":{"value":{"email":"e@test.io"}}}}` +
+			`,"space":{"sp-e":{"spaceId":"sp-e","value":{"value":{"id":"sp-e","name":"WS","settings":{"enable_ai_feature":true}}}}}},` +
+			`"space_view":{"sv-e":{"spaceId":"sp-e"}}}}`))
+	})
+	mux.HandleFunc("POST /api/v3/getAvailableModels", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"models":[{"model":"e2e-model","modelMessage":"E2E","isDisabled":false}]}`))
+	})
+	mux.HandleFunc("POST /api/v3/runInferenceTranscript", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.ReadAll(r.Body)
+		// пустой 200-стрим: ни content, ни ошибок
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "{\"type\":\"patch-start\",\"data\":{\"s\":[]}}\n")
+	})
+	mock := httptest.NewServer(mux)
+	t.Cleanup(mock.Close)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "e2e-empty-cap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := &config.Config{
+		Host: "127.0.0.1", Port: 0,
+		APIKey: "sk-test", AdminKey: "adm",
+		RotateAt: 0.8, DefaultWindow: "month", DefaultLimit: 0,
+		StickySessions: false, MaxAttempts: 32,
+		UpstreamTimeout: 30 * time.Second, RefreshInterval: time.Hour,
+		NotionBaseURL: mock.URL, NotionClientVersion: "test", UserAgent: "ua",
+	}
+	p, err := pool.New(cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		id := strings.Repeat(string(rune('a'+i)), 8) + "-0000-0000-0000-000000000000"
+		if err := p.Add(model.Account{ID: id, Label: "e", TokenV2: "tok", UserID: "u-e",
+			SpaceID: "sp-e", Status: model.StatusActive,
+			Models: []string{"e2e-model"}, LastUsed: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := httptest.NewServer(New(cfg, p, st).Handler())
+	t.Cleanup(ts.Close)
+
+	resp, _ := postJSON(t, ts.URL+"/v1/chat/completions", "sk-test", map[string]any{
+		"model":    "e2e-model",
+		"messages": []map[string]any{{"role": "user", "content": "hi"}},
+	})
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("empty streams must not succeed")
+	}
+	if calls != 3 {
+		t.Fatalf("failover must stop after 3 empties, got %d upstream calls", calls)
+	}
+}

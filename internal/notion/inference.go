@@ -47,6 +47,13 @@ var ErrAINotEnabled = errors.New("notion: AI not enabled on this space")
 // модели, а не space: аккаунт НЕ отправляем в cooldown.
 var ErrModelDisabled = errors.New("notion: model disabled for this plan")
 
+// ErrEmptyStream marks an upstream answer with zero content: Notion closes
+// instantly when throttled, when the space lacks AI, or when the model is
+// gated for the account's plan (e.g. premium models on trials —
+// getAvailableModels still lists them as enabled!). Sentinel (not string
+// matching) so the executor can count consecutive empties per request.
+var ErrEmptyStream = errors.New("notion: upstream empty stream (throttled, AI disabled or model gated)")
+
 // isAINotEnabledMessage detects all known spellings of the upstream
 // "AI not enabled" signal (case-insensitive): aiNotEnabled,
 // AiNotEnabledOnSpace..., ai_not_enabled, ai-not-enabled, "ai not enabled".

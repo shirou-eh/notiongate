@@ -347,6 +347,7 @@ func (s *Server) runInference(ctx context.Context, job *translate.ChatJob, forwa
 			SpaceViewID: acc.SpaceViewID,
 			Model:       mdl,
 			Transcript:  transcript,
+			ToolsJSON:   job.ToolsSpecJSON,
 		}
 		events, cancel, err := cli.RunInferenceStream(ctx, req)
 		if err != nil {

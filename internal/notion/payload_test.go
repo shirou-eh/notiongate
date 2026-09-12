@@ -108,3 +108,23 @@ func TestPayloadMatchesRealClient(t *testing.T) {
 		t.Fatal("no user blocks in transcript")
 	}
 }
+
+func TestConfigBlockCarriesTools(t *testing.T) {
+	e := ConfigBlock("angel-cake-high", `[{"name":"Edit","description":"d"}]`)
+	m, ok := e.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("value type %T", e.Value)
+	}
+	tools, ok := m["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %v", m["tools"])
+	}
+	if m["model"] != "angel-cake-high" || m["toolChoice"] != "auto" {
+		t.Fatalf("cfg = %v", m)
+	}
+	// без спеков ключ tools отсутствует (обычный путь не меняется)
+	e2 := ConfigBlock("angel-cake-high")
+	if _, ok := e2.Value.(map[string]any)["tools"]; ok {
+		t.Fatal("tools key must be absent without specs")
+	}
+}

@@ -96,12 +96,28 @@ func prepareJob(ctx context.Context, job *translate.ChatJob) {
 			}
 			bTools = append(bTools, tools.Tool{Name: t.Name, Description: t.Description, Parameters: raw})
 		}
-		// Промпт инжектится только если хотя бы один тул реально нужен
-		if tools.ShouldActivate(lastText, hasTools, job.ToolChoice) {
+		// Промпт инжектится только если хотя бы один тул реально нужен.
+		// Config-плейсмент: спеки едут в config-блоке транскрипта
+		// (харнесс-нативный вид), в тексте — только протокол вызова.
+		if job.ToolsPlacement == "config" {
+			if spec := translate.ToolsSpecJSON(job.Tools); spec != "" {
+				job.ToolsSpecJSON = spec
+				job.System = append(job.System, translate.ConfigProtocolHint)
+			} else if tools.ShouldActivate(lastText, hasTools, job.ToolChoice) {
+				if prompt := tools.DefaultBridge.PromptInjection(bTools, job.ToolChoice); prompt != "" {
+					job.System = append(job.System, prompt)
+				}
+			}
+		} else if tools.ShouldActivate(lastText, hasTools, job.ToolChoice) {
 			if prompt := tools.DefaultBridge.PromptInjection(bTools, job.ToolChoice); prompt != "" {
 				job.System = append(job.System, prompt)
 			}
 		}
+	}
+
+	// 2b. Effort — явной строкой в system (честный хинт, не скрытый рероут).
+	if line := translate.EffortInstruction(job.Effort); line != "" {
+		job.System = append([]string{line}, job.System...)
 	}
 
 	// 3. Окно контекста — как у реальной модели (200k для Claude, 128k для GPT).

@@ -32,6 +32,10 @@ type anthropicRequest struct {
 	Metadata   *anthropicMetadata `json:"metadata,omitempty"`
 	Tools      []anthropicTool    `json:"tools,omitempty"`
 	ToolChoice any                `json:"tool_choice,omitempty"`
+	// notiongate extensions (documented in README):
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	Effort          string `json:"effort,omitempty"`
+	ToolsPlacement  string `json:"tools_placement,omitempty"`
 }
 
 type anthropicTool struct {
@@ -59,6 +63,12 @@ func ParseAnthropic(body []byte) (*ChatJob, error) {
 		Protocol: "anthropic",
 		Stream:   req.Stream,
 	}
+	if e := NormalizeEffort(req.ReasoningEffort); e != "" {
+		job.Effort = e
+	} else if e := NormalizeEffort(req.Effort); e != "" {
+		job.Effort = e
+	}
+	job.ToolsPlacement = NormalizePlacement(req.ToolsPlacement)
 	for _, t := range req.Tools {
 		if t.Name == "" {
 			continue

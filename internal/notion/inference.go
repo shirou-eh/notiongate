@@ -114,6 +114,9 @@ type InferenceRequest struct {
 	SpaceViewID string
 	Model       string // Notion-internal model codename (empty → server default)
 	Transcript  []TranscriptEntry
+	// ToolsJSON — спеки тулзов для config-плейсмента (JSON-массив
+	// [{name,description,parameters}]). Пусто = обычный system-инжект.
+	ToolsJSON string
 	// IsProbe marks bootstrap probes: skips title generation.
 	IsProbe bool
 }
@@ -135,7 +138,7 @@ func (c *Client) RunInferenceStream(ctx context.Context, req *InferenceRequest) 
 	}
 	transcript := make([]TranscriptEntry, 0, len(turns)+2)
 	transcript = append(transcript,
-		ConfigBlock(req.Model),
+		ConfigBlock(req.Model, req.ToolsJSON),
 		ContextBlock(req.UserID, req.Email, req.UserName, sid, req.SpaceName, req.SpaceViewID),
 		UserSpecifiedContextBlock(),
 	)
@@ -783,7 +786,12 @@ var transcriptClock = func() string {
 }
 
 // ConfigBlock builds the transcript config entry.
-func ConfigBlock(notionModel string) TranscriptEntry {
+//
+// toolsJSON — спеки тулзов для config-плейсмента (уже JSON-массив).
+// Кладётся под ключом "tools": спеки выглядят харнесс-нативно, а не как
+// "поддельные схемы в сообщении" — так у модели меньше повода отказываться
+// от вызова (живые отказы Sonnet/Gemini 2026-09-12 ссылались именно на это).
+func ConfigBlock(notionModel string, toolsJSON ...string) TranscriptEntry {
 	cfg := map[string]any{
 		"type":                                           "workflow",
 		"modelFromUser":                                  true,
@@ -850,6 +858,13 @@ func ConfigBlock(notionModel string) TranscriptEntry {
 	}
 	if notionModel != "" {
 		cfg["model"] = notionModel
+	}
+	if len(toolsJSON) > 0 && strings.TrimSpace(toolsJSON[0]) != "" {
+		var specs any
+		if json.Unmarshal([]byte(toolsJSON[0]), &specs) == nil {
+			cfg["tools"] = specs
+			cfg["toolChoice"] = "auto"
+		}
 	}
 	return TranscriptEntry{ID: model.NewID(), Type: "config", Value: cfg}
 }

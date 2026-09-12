@@ -3,6 +3,7 @@
 package translate
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/shirou-eh/notiongate/internal/model"
@@ -44,6 +45,17 @@ type ChatJob struct {
 	Turns       []Turn
 	Tools       []Tool
 	ToolChoice  string // "auto" | "required" | "none" | ""
+	// Effort: reasoning effort hint ("low"|"medium"|"high", "" = unset).
+	// Applied as an explicit thinking instruction (Notion has no native
+	// effort knob — documented honestly, not a silent reroute).
+	Effort string
+	// ToolsPlacement: где модель видит спеки тулзов —
+	//   "system" (default): текстовая инструкция в system (OpenAI-диалект);
+	//   "config": спеки лежат в config-блоке транскрипта под ключом "tools",
+	//     в тексте только протокол вызова (ближе к харнесс-нативному виду).
+	ToolsPlacement string
+	// ToolsSpecJSON: JSON спеков тулзов для config-плейсмента.
+	ToolsSpecJSON string
 }
 
 // EstimateTokens gives a rough token count (~4 chars/token). Used only when
@@ -172,3 +184,76 @@ func TranscriptInputTokens(t []notion.TranscriptEntry) int64 {
 	}
 	return total
 }
+
+// NormalizeEffort keeps only known effort levels.
+func NormalizeEffort(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "low", "minimal", "min":
+		return "low"
+	case "medium", "med", "normal":
+		return "medium"
+	case "high", "max", "thorough":
+		return "high"
+	default:
+		return ""
+	}
+}
+
+// EffortInstruction renders the effort hint as an explicit system line.
+// Notion exposes no native effort knob, so this is an honest instruction,
+// not a silent model reroute.
+func EffortInstruction(effort string) string {
+	switch NormalizeEffort(effort) {
+	case "low":
+		return "Effort: low — think briefly and answer concisely, avoid long deliberation."
+	case "medium":
+		return "Effort: medium — think a normal amount before answering."
+	case "high":
+		return "Effort: high — think carefully step by step before answering; be thorough."
+	default:
+		return ""
+	}
+}
+
+// NormalizePlacement keeps only known tools placements.
+func NormalizePlacement(s string) string {
+	if strings.ToLower(strings.TrimSpace(s)) == "config" {
+		return "config"
+	}
+	return "system"
+}
+
+// ToolsSpecJSON renders tool definitions for the config-block placement:
+// [{"name":...,"description":...,"parameters":{...}}], compact. Empty when
+// there are no tools.
+func ToolsSpecJSON(tools []Tool) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	type spec struct {
+		Name        string `json:"name"`
+		Description string `json:"description,omitempty"`
+		Parameters  any    `json:"parameters,omitempty"`
+	}
+	out := make([]spec, 0, len(tools))
+	for _, t := range tools {
+		if t.Name == "" {
+			continue
+		}
+		out = append(out, spec{Name: t.Name, Description: t.Description, Parameters: t.Parameters})
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// ConfigProtocolHint is the one-line calling protocol used with the config
+// placement: no tool specs in text, only the emission format.
+const ConfigProtocolHint = "Tool definitions are in this transcript's config block under \"tools\". " +
+	"To call a tool, output ONLY a JSON block:\n" +
+	"```json\n{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"<name>\",\"arguments\":\"{...}\"}}]}\n```"

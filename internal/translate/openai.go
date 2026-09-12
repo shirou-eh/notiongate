@@ -31,6 +31,10 @@ type openAIRequest struct {
 	User       string       `json:"user"`
 	Tools      []openAITool `json:"tools,omitempty"`
 	ToolChoice any          `json:"tool_choice,omitempty"`
+	// notiongate extensions (ignored by real OpenAI, documented in README):
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	Effort          string `json:"effort,omitempty"`
+	ToolsPlacement  string `json:"tools_placement,omitempty"`
 }
 
 type openAITool struct {
@@ -59,6 +63,12 @@ func ParseOpenAI(body []byte) (*ChatJob, error) {
 		Protocol: "openai",
 		Stream:   req.Stream,
 	}
+	if e := NormalizeEffort(req.ReasoningEffort); e != "" {
+		job.Effort = e
+	} else if e := NormalizeEffort(req.Effort); e != "" {
+		job.Effort = e
+	}
+	job.ToolsPlacement = NormalizePlacement(req.ToolsPlacement)
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 	if includeUsage {
 		job.StreamUsage = true

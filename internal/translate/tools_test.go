@@ -120,3 +120,55 @@ func TestBuildAnthropicToolBlocks(t *testing.T) {
 		t.Fatalf("delta = %s", d)
 	}
 }
+
+func TestParseOpenAIEffort(t *testing.T) {
+	mk := func(extra string) *ChatJob {
+		body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]` + extra + `}`)
+		job, err := ParseOpenAI(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+	if got := mk(``).Effort; got != "" {
+		t.Fatalf("default effort = %q", got)
+	}
+	if got := mk(`,"reasoning_effort":"high"`).Effort; got != "high" {
+		t.Fatalf("effort = %q", got)
+	}
+	if got := mk(`,"effort":"LOW"`).Effort; got != "low" {
+		t.Fatalf("effort alias = %q", got)
+	}
+	if got := mk(`,"reasoning_effort":"ultra"`).Effort; got != "" {
+		t.Fatalf("bad effort must drop: %q", got)
+	}
+	if got := mk(`,"tools_placement":"config"`).ToolsPlacement; got != "config" {
+		t.Fatalf("placement = %q", got)
+	}
+	if got := mk(``).ToolsPlacement; got != "system" {
+		t.Fatalf("default placement = %q", got)
+	}
+	for _, e := range []string{"low", "medium", "high"} {
+		if EffortInstruction(e) == "" {
+			t.Fatalf("no instruction for %s", e)
+		}
+	}
+	spec := ToolsSpecJSON([]Tool{{Name: "Edit", Description: "d", Parameters: map[string]any{"type": "object"}}})
+	if !strings.Contains(spec, `"name":"Edit"`) {
+		t.Fatalf("spec = %s", spec)
+	}
+	if ToolsSpecJSON(nil) != "" {
+		t.Fatalf("empty tools must give empty spec")
+	}
+}
+
+func TestParseAnthropicEffort(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":10,"effort":"high","messages":[{"role":"user","content":"hi"}]}`)
+	job, err := ParseAnthropic(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Effort != "high" {
+		t.Fatalf("effort = %q", job.Effort)
+	}
+}
